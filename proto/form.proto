@@ -1,0 +1,239 @@
+syntax = "proto3";
+
+// Reconstructed from FORM Swim APK decompilation
+
+message FormMessage {
+  bool isCommandMessage = 1;
+  bytes data = 2;
+}
+
+message FormCommandMessage {
+  CommandType commandType = 1;
+  uint32 fileIndex = 2;
+  uint32 maxChunkSize = 3;
+  uint32 chunkID = 4;
+  uint32 fileSize = 5;
+  string fileName = 6;
+  FileType fileType = 7;
+  bool isCompressed = 8;
+  string userKey = 9;
+  string bleLogPassword = 10;
+
+  enum CommandType {
+    RESERVED_COMMAND_TYPE = 0;
+    SYNC_START = 1;
+    SYNC_COMPLETE = 2;
+    ACTIVITY_FILE_INFO_REQUEST = 3;
+    ACTIVITY_FILE_REQUEST = 4;
+    DEVICE_SETTINGS_REQUEST = 5;
+    ANALYTICS_REQUEST = 6;
+    OTA_TRANSFER_START = 7;
+    OTA_TRANSFER_DONE = 8;
+    OTA_TRANSFER_CHUNK_ID_REQUEST = 9;
+    OTA_TRANSFER_READY_TO_RECEIVE = 10;
+    OTA_TRANSFER_SUCCESS = 11;
+    OTA_TRANSFER_FAIL = 12;
+    ACTIVITY_FILE_TRANSFER_ACK = 13;
+    USER_PROFILE_ACK = 14;
+    DEVICE_SETTINGS_ACK = 15;
+    USER_GOALS_ACK = 16;
+    USER_STATS_ACK = 17;
+    ACTIVITY_FILE_TRANSFER_START = 18;
+    ACTIVITY_FILE_TRANSFER_DONE = 19;
+    ENABLE_BLE_LOGGING = 20;
+    DISABLE_BLE_LOGGING = 21;
+    FILE_TRANSFER_START = 22;
+    FILE_TRANSFER_DONE = 23;
+    FILE_TRANSFER_READY_TO_RECEIVE = 24;
+    FILE_TRANSFER_SUCCESS = 25;
+    FILE_TRANSFER_FAIL = 26;
+    FILE_TRANSFER_INFO_REQUEST = 27;
+    FILE_TRANSFER_REQUEST = 28;
+    SOFT_RESET_REQUEST = 29;
+    SYNC_START_NO_UI = 30;
+    FEATURE_FLAGS_ACK = 31;
+    ACCESSORIES_INFO_REQUEST = 32;
+    UNKNOWN_CMD = 33;
+    FILE_TRANSFER_CHUNK_ID_REQUEST = 34;
+    INCOMPLETE_ACTIVITY_INFO_REQUEST = 35;
+    OWS_TUTORIAL_SIMULATION_START = 36;
+    SAVED_WORKOUTS_REQUEST = 37;
+    PLAN_INFO_REQUEST = 38;
+    IMPORTED_WORKOUTS_INFO_REQUEST = 39;
+    UNSUPPORTED_DATA_MESSAGE = 40;
+    UNSUPPORTED_FORM_FILE_TYPE = 41;
+    BLE_DISCONNECT_DUE_TO_SWIM_START = 42;
+    BLE_DISCONNECT_DUE_TO_SHUTDOWN = 43;
+    BLE_DISCONNECT_DUE_TO_SYNC_TIMEOUT = 44;
+    BLE_DISCONNECT_DUE_TO_OTA_TIMEOUT = 45;
+    BLE_DISCONNECT_DUE_TO_DISABLED_CONNECTION = 46;
+  }
+
+  enum FileType {
+    RESERVED_FILE_TYPE = 0;
+    ACTIVITIES = 1;
+    LOGS = 2;
+    ANALYTICS_FT = 3;
+    OTA = 4;
+    OTHER = 5;
+    SENSOR_DATA = 6;
+    LOG_DIAGNOSTICS = 7;
+    FORM_FILE = 8;
+    FULL_SENSOR_DATA = 9;
+  }
+}
+
+// V2 wrapper message for file transfers
+message FormFileMessage {
+  FormFileType type = 1;
+  bytes data = 2;
+  bool isEncrypted = 3;
+
+  enum FormFileType {
+    RESERVED_FORM_FILE_TYPE = 0;
+    SWIM_PASSPORT = 1;
+    DEVICE_SETTINGS_V2 = 2;
+    DEVICE_DASHBOARDS_V2 = 3;
+    SWIM_SPA_SETTINGS = 4;
+    WORKOUT_DATA = 5;
+    SAVED_WORKOUTS = 6;
+    WORKOUTS_INFO = 7;
+    SUBSCRIPTION_INFO = 8;
+    PLAN_INFO = 9;
+    DEVICE_ENTITLEMENT = 10;
+    IMPORTED_WORKOUTS_INFO = 11;
+    SWIM_STATS = 12;
+    USER_PROFILE_V2 = 13;
+    HEAD_COACH_INSIGHTS = 14;
+    UP_NEXT_WORKOUTS = 15;
+    REMOTE_CONFIG = 16;
+    FEATURE_FLAGS_V2 = 17;
+  }
+}
+
+message Timestamp {
+  uint64 seconds = 1;
+}
+
+// Saved workouts list (type 6)
+message SavedWorkoutsMessage {
+  repeated SavedWorkoutInfo workouts = 1;
+}
+message SavedWorkoutInfo {
+  string id = 1;
+  Timestamp lastModifiedAt = 2;
+}
+
+// Workouts info with categories (type 7)
+message WorkoutsInfoMessage {
+  repeated WorkoutInfo standaloneWorkouts = 1;
+  repeated WorkoutInfo planWorkouts = 2;
+  repeated WorkoutInfo sampleWorkouts = 3;
+  repeated WorkoutInfo importedWorkouts = 4;
+  repeated WorkoutInfo personalizedWorkouts = 5;
+}
+message WorkoutInfo {
+  string id = 1;
+  uint32 expectedDuration = 2;
+}
+
+// Plan info (type 9)
+message PlanInfoMessage {
+  repeated PlanWorkoutInfo workouts = 1;
+  string name = 2;
+  string id = 3;
+  uint32 userPlanId = 4;
+  Timestamp planStartTimeUTC = 5;
+  uint32 planWeekRollOverTimeOfDay = 6;
+  uint32 planWeekDuration = 7;
+  uint32 planCurrentWeekCursor = 8;
+}
+message PlanWorkoutInfo {
+  string workoutId = 1;
+  uint32 planWeekWorkoutId = 2;
+  uint32 weekNumber = 3;
+  PlanWorkoutStatus status = 4;
+  Timestamp statusLastModified = 5;
+  Timestamp expiresAt = 6;
+
+  enum PlanWorkoutStatus {
+    RESERVED_STATUS = 0;
+    UPCOMING = 10;
+    AUTO_SKIPPED = 20;
+    SKIPPED = 30;
+    COMPLETED = 40;
+  }
+}
+
+// Imported workouts info (type 11)
+message ImportedWorkoutsInfoMessage {
+  repeated ImportedWorkoutInfo workouts = 1;
+  bool isTrainingPeaksConnected = 2;
+}
+message ImportedWorkoutInfo {
+  string workoutId = 1;
+  Timestamp scheduledAt = 2;
+  ImportedWorkoutStatus status = 3;
+  Timestamp statusLastModified = 4;
+  Timestamp lastSync = 5;
+  ImportedWorkoutOrigin origin = 6;
+  Timestamp expiresAt = 7;
+
+  enum ImportedWorkoutStatus {
+    RESERVED_STATUS = 0;
+    UPCOMING = 10;
+    SKIPPED = 20;
+    COMPLETED = 30;
+  }
+  enum ImportedWorkoutOrigin {
+    RESERVED_ORIGIN = 0;
+    FORM_WORKOUT = 1;
+    CUSTOM_WORKOUT = 2;
+    TRAINING_PEAKS_WORKOUT = 3;
+  }
+}
+
+// Up-next workouts (type 15)
+message UpNextWorkoutsMessage {
+  repeated UpNextWorkoutInfo upNextWorkouts = 1;
+}
+message UpNextWorkoutInfo {
+  string id = 1;
+  UpNextWorkoutType type = 2;
+  uint32 expectedDuration = 3;
+  uint32 planWeekWorkoutId = 4;
+
+  enum UpNextWorkoutType {
+    RESERVED_WORKOUT_TYPE = 0;
+    STANDALONE_WORKOUT = 1;
+    PLAN_WORKOUT = 2;
+    IMPORT_WORKOUT = 3;
+    HEAD_COACH_WORKOUT = 4;
+  }
+}
+
+message FormDataMessage {
+  DataType dataType = 1;
+  uint32 fileIndex = 2;
+  uint32 chunkID = 3;
+  uint32 crc = 4;
+  bytes data = 5;
+
+  enum DataType {
+    RESERVED_DATA_TYPE = 0;
+    ACTIVITY_FILE = 1;
+    ACTIVITY_INFO = 2;
+    ANALYTICS_DT = 3;
+    DEVICE_SETTINGS = 4;
+    USER_PROFILE = 5;
+    USER_GOALS = 6;
+    USER_STATS = 7;
+    OTA_BINARY_FILE = 8;
+    FILE_TRANSFER = 9;
+    FILE_INFO = 10;
+    FEATURE_FLAGS = 11;
+    ACCESSORIES_INFO = 12;
+    CHARACTERISTIC_SIZE_TEST = 13;
+    INCOMPLETE_ACTIVITY_FILE_INFO = 14;
+  }
+}

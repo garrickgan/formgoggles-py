@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+// FORM Workout Data protobuf schema
+// Reverse-engineered from API responses at /api/v1/users/me/workouts/protobuf
+// This is the inner binary content of FormFileMessage type=5 (WORKOUT_DATA)
+
+message WorkoutData {
+  string minFirmwareVersion = 1;  // e.g. "2.0.0"
+  string id = 2;                   // UUID
+  string name = 3;                 // Display name
+  repeated SetGroup setGroups = 4;
+  bytes equipmentTypes = 5;        // Equipment enum bytes used across workout
+  string category = 6;             // "Endurance", "Sprint", "Recovery", etc.
+  uint32 revisionNumber = 7;
+  ImageInfo imageInfo = 8;
+  uint32 workoutVersion = 9;       // 1 or 2
+  uint32 isPublished = 10;         // 1 = published
+}
+
+message ImageInfo {
+  uint32 timestamp = 1;            // Unix timestamp for image cache busting
+}
+
+message SetGroup {
+  uint32 groupType = 1;            // 1=warmup, 2=cooldown, 4=main
+  RoundsCount rounds = 2;
+  repeated Set sets = 3;
+  Rest groupRest = 4;              // Rest between rounds of this group
+}
+
+message RoundsCount {
+  uint32 count = 1;
+}
+
+message Set {
+  IntervalsCount intervals = 1;
+  repeated IntervalSpec specs = 2;  // Usually 1; 2+ for descend/build
+  Rest rest = 3;                    // Auto-calculated rest (not always = JSON rest)
+  // field 4 unused
+  DrillInfo drill = 5;
+  bytes equipment = 6;              // Equipment enum bytes for this set
+  // fields 7, 8 unused
+  EffortInfo effort = 9;
+  // field 10 unused
+  uint32 internalId = 11;           // Sequential internal ID
+  // field 12 unused
+  uint32 headCoachFocusMode = 13;   // 1 = intervalPacing
+}
+
+message IntervalsCount {
+  uint32 count = 1;
+}
+
+message IntervalSpec {
+  StrokeInfo stroke = 1;
+  Rest intervalRest = 2;            // Actual rest between intervals (matches JSON rest.defined)
+  uint32 poolLength = 3;            // Pool length in meters (25)
+  LengthsPerInterval lengths = 4;   // intervalDistance / poolLength
+  // field 5 unused
+  EffortRef effortRef = 6;          // Matches Set.effort.level
+}
+
+message StrokeInfo {
+  uint32 strokeType = 1;            // See StrokeType enum below
+  EffortRef effortRef = 2;          // Same level as parent
+}
+
+message EffortRef {
+  // Fields 1, 2 unused
+  uint32 level = 3;                 // See EffortLevel enum below
+}
+
+message LengthsPerInterval {
+  uint32 lengths = 1;               // Number of pool lengths per interval
+}
+
+message Rest {
+  uint32 type = 1;                  // 2 = defined, (1 = takeoff?)
+  uint32 seconds = 2;              // Rest duration in seconds (0 or absent = no rest)
+}
+
+message EffortInfo {
+  // Fields 1, 2 unused
+  uint32 level = 3;                 // Primary effort level
+  // Fields 4-12 unused
+  uint32 fromLevel = 13;            // For descend: starting effort level
+  // Fields 14-22 unused
+  uint32 toLevel = 23;              // For descend: ending effort level
+}
+
+message DrillInfo {
+  uint32 id = 1;                    // Drill ID (from API, +1?)
+  uint32 unknown2 = 2;             // Always 1?
+  // field 3 unused
+  string name = 4;                  // "kick", etc.
+  string abbreviation = 5;         // "K", etc.
+}
+
+// ===== Enum Reference =====
+//
+// StrokeType (StrokeInfo.strokeType):
+//   0 = RESERVED
+//   4 = freestyle
+//   6 = choice
+//   (absent/0 = drill when DrillInfo present)
+//   3 = backstroke (inferred)
+//   5 = breaststroke (inferred)
+//   7 = butterfly (inferred)
+//   8 = IM (inferred)
+//
+// EffortLevel (EffortRef.level, EffortInfo.level):
+//   1 = easy
+//   2 = moderate
+//   3 = fast
+//   6 = max
+//   7 = descend
+//   9 = strong
+//
+// GroupType (SetGroup.groupType):
+//   1 = warmup
+//   2 = cooldown
+//   4 = main
+//
+// EquipmentType (bytes):
+//   1 = kickboard
+//   2 = ? (pull buoy?)
+//   3 = ? (paddles?)
+//   4 = fins
+//   6 = ? (snorkel?)
