@@ -2,6 +2,8 @@
 
 Push custom swim workouts to FORM smart goggles over Bluetooth LE — no subscription required.
 
+> **Legal disclaimer:** This project is educational research into protocol interoperability. I am not a lawyer. Reverse engineering for interoperability purposes is protected under DMCA §1201(f) in the US and similar statutes elsewhere. Use responsibly and in accordance with your local laws.
+
 ## What this does
 
 FORM swim goggles are excellent hardware. The subscription paywall for custom workout sync is not. This tool implements the FORM BLE + API protocol so you can push structured swim workouts directly to your goggles from the command line.
