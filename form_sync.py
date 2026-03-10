@@ -733,28 +733,62 @@ async def run(args):
         return 1
 
 
+def cmd_login(email, password):
+    """Authenticate with FORM API and print tokens. No subscription required."""
+    r = requests.post(
+        f"{API_BASE}/oauth/token",
+        headers={"Authorization": f"Basic {OAUTH_BASIC}", "Content-Type": "application/json"},
+        json={"email": email, "password": password},
+        timeout=10,
+    )
+    if r.status_code != 200:
+        print(f"Login failed ({r.status_code}): {r.text}", file=sys.stderr)
+        return 1
+    data = r.json()
+    access = data["accessToken"]
+    refresh = data["refreshToken"]
+    print(f"accessToken:  {access['token']}")
+    print(f"  expires:    {access['expires']}")
+    print(f"refreshToken: {refresh['token']}")
+    print(f"  expires:    {refresh['expires']}")
+    print(f"\nPass to form_sync.py:")
+    print(f"  --token {access['token']} --refresh-token {refresh['token']}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="formgoggles-py: Push custom workouts to FORM swim goggles",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  %(prog)s --login your@email.com yourpassword
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --workout "10x100 free @moderate 20s rest"
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --workout "warmup: 200 free easy | main: 8x100 free @fast 15s rest | cooldown: 200 free easy"
   %(prog)s --token TOKEN --workout "5x200 free @mod 30s rest" --no-ble
   %(prog)s --token TOKEN --workout "10x50 fly @max 30s rest" --no-ble --name "Sprint Fly"
         """
     )
-    parser.add_argument("--token", required=True, help="FORM API bearer token")
+    parser.add_argument("--login", nargs=2, metavar=("EMAIL", "PASSWORD"),
+                        help="Get a bearer token from your FORM credentials (no subscription required)")
+    parser.add_argument("--token", help="FORM API bearer token")
     parser.add_argument("--refresh-token", help="FORM API refresh token (auto-refreshes on 401)")
-    parser.add_argument("--goggle-mac", required=True, help="Goggles BLE MAC address (e.g. AA:BB:CC:DD:EE:FF)")
-    parser.add_argument("--workout", required=True, help="Workout description string")
+    parser.add_argument("--goggle-mac", help="Goggles BLE MAC address (e.g. AA:BB:CC:DD:EE:FF)")
+    parser.add_argument("--workout", help="Workout description string")
     parser.add_argument("--name", help="Workout name (auto-generated if omitted)")
     parser.add_argument("--replace-id", help="Workout ID to remove when saving (if at max)")
     parser.add_argument("--no-ble", action="store_true", help="Skip BLE push (create + save on server only)")
     parser.add_argument("--list-workouts", action="store_true", help="List saved workouts and exit")
 
     args = parser.parse_args()
+
+    # --login: get a token and exit
+    if args.login:
+        return cmd_login(args.login[0], args.login[1])
+
+    # All other commands require --token
+    if not args.token:
+        parser.error("--token is required (or use --login EMAIL PASSWORD to get one)")
 
     if args.list_workouts:
         api = FormAPI(args.token, refresh_token=getattr(args, 'refresh_token', None))
@@ -766,6 +800,9 @@ Examples:
             origin = w.get("origin", "?")
             print(f"  {wid}  {wname}  ({origin})", flush=True)
         return 0
+
+    if not args.workout:
+        parser.error("--workout is required")
 
     return asyncio.run(run(args))
 
