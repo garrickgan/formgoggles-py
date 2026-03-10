@@ -130,12 +130,24 @@ Effort aliases: `threshold`=moderate, `hard`=fast, `sprint`=max, `warm`=easy
 
 ## Getting Your Bearer Token
 
+The easiest way is a direct API login — no mitmproxy needed:
+
+```bash
+python3 form_sync.py --login your@email.com yourpassword
+```
+
+This prints your `accessToken` (valid 30 days) and `refreshToken` (valid 6 months).
+
+**A free FORM account is sufficient** — no active subscription required to authenticate or use BLE sync.
+
+Alternatively, capture it manually:
+
 1. Install [mitmproxy](https://mitmproxy.org/)
 2. Configure your phone to proxy through mitmproxy
 3. Open the FORM app and trigger any sync
 4. Find the `Authorization: Bearer ...` header in the captured requests to `app.formathletica.com`
 
-The bearer token lasts ~30 days. Pass `--refresh-token` to auto-refresh.
+Pass `--refresh-token` to auto-refresh on expiry.
 
 ## Protocol Documentation
 
