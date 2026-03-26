@@ -1120,8 +1120,7 @@ footer a { color: #666; }
   </div>
 
   <div id="actions" class="actions hidden">
-    <button class="btn btn-secondary" id="btn-save" onclick="doSync(false)">Create &amp; Save</button>
-    <button class="btn btn-primary" id="btn-push" onclick="doSync(true)">Create, Save &amp; Push to Goggles</button>
+    <button class="btn btn-primary" id="btn-sync" onclick="doSync(HAS_BLE)"></button>
   </div>
 
   <div id="progress" class="progress hidden"></div>
@@ -1215,15 +1214,14 @@ function showPreview(data) {
   document.getElementById('actions').classList.remove('hidden');
   document.getElementById('progress').classList.add('hidden');
   document.getElementById('status').classList.add('hidden');
-  if (!HAS_BLE) document.getElementById('btn-push').classList.add('hidden');
+  document.getElementById('btn-sync').textContent = HAS_BLE ? 'Push to Goggles' : 'Create & Save';
 }
 
 function doSync(withBle) {
   const name = document.getElementById('preview-name').value.trim() || 'Custom Workout';
   const body = { sections: currentSections, name: name, ble: withBle };
   if (selectedReplaceId) body.replaceId = selectedReplaceId;
-  document.getElementById('btn-save').disabled = true;
-  document.getElementById('btn-push').disabled = true;
+  document.getElementById('btn-sync').disabled = true;
   const prog = document.getElementById('progress');
   prog.classList.remove('hidden');
   prog.innerHTML = '';
@@ -1263,8 +1261,7 @@ function doSync(withBle) {
   }).catch(e => {
     showStatus('Connection error: ' + e.message, true);
   }).finally(() => {
-    document.getElementById('btn-save').disabled = false;
-    document.getElementById('btn-push').disabled = false;
+    document.getElementById('btn-sync').disabled = false;
     loadWorkouts();
   });
 }
