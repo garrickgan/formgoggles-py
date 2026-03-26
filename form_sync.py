@@ -24,10 +24,13 @@ If no warmup/cooldown sections given, auto-generates 200m easy warmup + 200m eas
 import argparse
 import asyncio
 import base64
+import json
 import os
 import re
 import sys
+import tempfile
 import threading
+import webbrowser
 
 import requests
 
@@ -902,6 +905,524 @@ class FormAPI:
         return workouts
 
 
+# ===== Web UI =====
+
+UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>formgoggles-py</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: #111; color: #e0e0e0; min-height: 100vh; display: flex; flex-direction: column;
+}
+a { color: #00B4D8; }
+.container { max-width: 720px; margin: 0 auto; padding: 24px 16px; flex: 1; width: 100%; }
+header { text-align: center; margin-bottom: 32px; }
+header h1 { font-size: 1.75rem; font-weight: 700; color: #fff; }
+header h1 span { font-size: 1.5rem; margin-right: 8px; }
+header p { color: #888; margin-top: 4px; font-size: 0.9rem; }
+.tabs { display: flex; gap: 0; margin-bottom: 0; border-bottom: 1px solid #333; }
+.tab {
+  padding: 10px 20px; cursor: pointer; font-size: 0.9rem; color: #888;
+  border-bottom: 2px solid transparent; transition: all 0.15s;
+}
+.tab:hover { color: #ccc; }
+.tab.active { color: #00B4D8; border-bottom-color: #00B4D8; }
+.tab-content { display: none; padding: 20px 0; }
+.tab-content.active { display: block; }
+.drop-zone {
+  border: 2px dashed #333; border-radius: 12px; padding: 48px 24px; text-align: center;
+  cursor: pointer; transition: all 0.2s; position: relative;
+}
+.drop-zone:hover, .drop-zone.dragover { border-color: #00B4D8; background: rgba(0,180,216,0.05); }
+.drop-zone p { color: #888; margin-bottom: 8px; }
+.drop-zone .accent { color: #00B4D8; font-weight: 600; }
+.drop-zone input[type="file"] {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer;
+}
+textarea {
+  width: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+  color: #e0e0e0; padding: 12px; font-family: inherit; font-size: 0.95rem;
+  resize: vertical; min-height: 60px; transition: border-color 0.15s;
+}
+textarea:focus { outline: none; border-color: #00B4D8; }
+.syntax-ref {
+  margin-top: 12px; padding: 12px; background: #1a1a1a; border-radius: 8px;
+  font-size: 0.8rem; color: #666; line-height: 1.6;
+}
+.syntax-ref code { color: #888; background: #222; padding: 1px 5px; border-radius: 3px; }
+
+/* Preview */
+.preview { margin-top: 24px; }
+.preview h3 { font-size: 1rem; color: #fff; margin-bottom: 12px; }
+.preview-card {
+  background: #1a1a1a; border-radius: 12px; padding: 20px; border: 1px solid #222;
+}
+.preview-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.preview-name {
+  background: transparent; border: 1px solid transparent; color: #fff; font-size: 1.1rem;
+  font-weight: 600; padding: 4px 8px; border-radius: 6px; font-family: inherit;
+}
+.preview-name:hover { border-color: #333; }
+.preview-name:focus { outline: none; border-color: #00B4D8; }
+.preview-stats { font-size: 0.85rem; color: #888; }
+.section-label {
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: #00B4D8; margin: 12px 0 6px;
+}
+.set-row {
+  display: flex; justify-content: space-between; padding: 6px 0;
+  font-size: 0.9rem; border-bottom: 1px solid #1f1f1f;
+}
+.set-row:last-child { border-bottom: none; }
+.set-detail { color: #888; font-size: 0.85rem; }
+
+/* Actions */
+.actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
+.btn {
+  padding: 10px 20px; border-radius: 8px; font-size: 0.9rem; font-weight: 600;
+  cursor: pointer; border: none; transition: all 0.15s; font-family: inherit;
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: #00B4D8; color: #000; }
+.btn-primary:hover:not(:disabled) { background: #00c8ef; }
+.btn-secondary { background: #222; color: #e0e0e0; border: 1px solid #333; }
+.btn-secondary:hover:not(:disabled) { background: #2a2a2a; border-color: #444; }
+
+/* Progress */
+.progress { margin-top: 20px; }
+.step {
+  display: flex; align-items: center; gap: 10px; padding: 8px 0;
+  font-size: 0.9rem; color: #666;
+}
+.step.active { color: #00B4D8; }
+.step.done { color: #4ade80; }
+.step.error { color: #f87171; }
+.step-icon { width: 20px; text-align: center; font-size: 0.8rem; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #333; border-top-color: #00B4D8; border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Status */
+.status-msg {
+  margin-top: 16px; padding: 12px 16px; border-radius: 8px; font-size: 0.9rem;
+}
+.status-msg.success { background: rgba(74,222,128,0.1); color: #4ade80; border: 1px solid rgba(74,222,128,0.2); }
+.status-msg.error { background: rgba(248,113,113,0.1); color: #f87171; border: 1px solid rgba(248,113,113,0.2); }
+
+/* Saved workouts */
+.saved-workouts { margin-top: 32px; }
+.saved-workouts h3 { font-size: 1rem; color: #fff; margin-bottom: 12px; }
+.workout-list { display: flex; flex-direction: column; gap: 6px; }
+.workout-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; background: #1a1a1a; border-radius: 8px; border: 1px solid #222;
+  font-size: 0.85rem; cursor: pointer; transition: border-color 0.15s;
+}
+.workout-item:hover { border-color: #333; }
+.workout-item.selected { border-color: #00B4D8; }
+.workout-item .wname { color: #e0e0e0; }
+.workout-item .wid { color: #555; font-size: 0.75rem; font-family: monospace; }
+
+footer {
+  text-align: center; padding: 24px 16px; font-size: 0.8rem; color: #555;
+  border-top: 1px solid #1a1a1a;
+}
+footer a { color: #666; }
+
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1><span>🥽</span> formgoggles-py</h1>
+    <p>Push swim workouts to your FORM goggles</p>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="fit">FIT File</div>
+    <div class="tab" data-tab="string">Workout String</div>
+  </div>
+
+  <div id="tab-fit" class="tab-content active">
+    <div class="drop-zone" id="drop-zone">
+      <input type="file" id="fit-input" accept=".fit">
+      <p><span class="accent">Drop a .fit file here</span> or click to browse</p>
+      <p style="font-size:0.8rem;color:#555">Supports TrainingPeaks, Garmin Connect, Final Surge, Today&rsquo;s Plan</p>
+    </div>
+  </div>
+
+  <div id="tab-string" class="tab-content">
+    <textarea id="workout-input" placeholder='e.g. 10x100 free @moderate 20s rest&#10;or: warmup: 200 free easy | main: 8x100 free @fast 15s rest | cooldown: 200 free easy'></textarea>
+    <div class="syntax-ref">
+      <strong style="color:#888">Quick reference:</strong><br>
+      <code>NxDIST stroke @effort RESTs rest</code><br>
+      Sections: <code>warmup: ... | main: ... | cooldown: ...</code><br>
+      Multiple sets: <code>set1, set2, set3</code> (comma-separated)<br>
+      Strokes: <code>free back breast fly im choice</code><br>
+      Effort: <code>easy moderate fast strong max descend</code> &mdash; aliases: <code>threshold=moderate hard=fast sprint=max</code>
+    </div>
+  </div>
+
+  <div id="preview" class="preview hidden">
+    <h3>Workout Preview</h3>
+    <div class="preview-card">
+      <div class="preview-header">
+        <input type="text" class="preview-name" id="preview-name" value="">
+        <div class="preview-stats" id="preview-stats"></div>
+      </div>
+      <div id="preview-sections"></div>
+    </div>
+  </div>
+
+  <div id="actions" class="actions hidden">
+    <button class="btn btn-secondary" id="btn-save" onclick="doSync(false)">Create &amp; Save</button>
+    <button class="btn btn-primary" id="btn-push" onclick="doSync(true)">Create, Save &amp; Push to Goggles</button>
+  </div>
+
+  <div id="progress" class="progress hidden"></div>
+  <div id="status" class="hidden"></div>
+
+  <div id="saved-section" class="saved-workouts">
+    <h3>Saved Workouts</h3>
+    <div id="workout-list" class="workout-list">
+      <p style="color:#555;font-size:0.85rem">Loading...</p>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <a href="https://github.com/yourusername/formgoggles-py" target="_blank">GitHub</a>
+  &nbsp;&middot;&nbsp; Running locally on your machine &mdash; your credentials never leave this computer.
+</footer>
+
+<script>
+const HAS_BLE = !!__HAS_BLE__;
+let currentSections = null;
+let selectedReplaceId = null;
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+// Drop zone
+const dropZone = document.getElementById('drop-zone');
+const fitInput = document.getElementById('fit-input');
+['dragenter','dragover'].forEach(e => dropZone.addEventListener(e, ev => { ev.preventDefault(); dropZone.classList.add('dragover'); }));
+['dragleave','drop'].forEach(e => dropZone.addEventListener(e, ev => { ev.preventDefault(); dropZone.classList.remove('dragover'); }));
+dropZone.addEventListener('drop', ev => { if (ev.dataTransfer.files.length) uploadFit(ev.dataTransfer.files[0]); });
+fitInput.addEventListener('change', () => { if (fitInput.files.length) uploadFit(fitInput.files[0]); });
+
+async function uploadFit(file) {
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const r = await fetch('/api/parse-fit', { method: 'POST', body: form });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Parse failed');
+    showPreview(data);
+  } catch(e) { showStatus('Error: ' + e.message, true); }
+}
+
+// Workout string
+const wInput = document.getElementById('workout-input');
+let parseTimer;
+wInput.addEventListener('input', () => { clearTimeout(parseTimer); parseTimer = setTimeout(parseString, 600); });
+wInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); parseString(); } });
+
+async function parseString() {
+  const text = wInput.value.trim();
+  if (!text) return;
+  try {
+    const r = await fetch('/api/parse-string', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({workout: text})
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Parse failed');
+    showPreview(data);
+  } catch(e) { showStatus('Error: ' + e.message, true); }
+}
+
+function showPreview(data) {
+  currentSections = data.sections;
+  document.getElementById('preview-name').value = data.name;
+  document.getElementById('preview-stats').textContent = data.totalDistance + 'm \\u00b7 ~' + Math.floor(data.estimatedDuration/60) + 'min';
+  const container = document.getElementById('preview-sections');
+  container.innerHTML = '';
+  const strokeMap = {freestyle:'Free',backstroke:'Back',breaststroke:'Breast',butterfly:'Fly',im:'IM',choice:'Choice'};
+  for (const key of ['warmup','main','cooldown']) {
+    const sets = data.sections[key];
+    if (!sets || !sets.length) continue;
+    container.innerHTML += '<div class="section-label">' + key + '</div>';
+    for (const s of sets) {
+      const stroke = strokeMap[s.strokeType] || s.strokeType;
+      const label = s.intervalsCount > 1 ? s.intervalsCount + 'x' + s.intervalDistance + 'm' : s.intervalDistance + 'm';
+      const detail = stroke + ' @' + s.effort + (s.restSeconds ? ' / ' + s.restSeconds + 's rest' : '');
+      container.innerHTML += '<div class="set-row"><span>' + label + ' ' + stroke + '</span><span class="set-detail">@' + s.effort + (s.restSeconds ? ' / ' + s.restSeconds + 's rest' : '') + '</span></div>';
+    }
+  }
+  document.getElementById('preview').classList.remove('hidden');
+  document.getElementById('actions').classList.remove('hidden');
+  document.getElementById('progress').classList.add('hidden');
+  document.getElementById('status').classList.add('hidden');
+  if (!HAS_BLE) document.getElementById('btn-push').classList.add('hidden');
+}
+
+function doSync(withBle) {
+  const name = document.getElementById('preview-name').value.trim() || 'Custom Workout';
+  const body = { sections: currentSections, name: name, ble: withBle };
+  if (selectedReplaceId) body.replaceId = selectedReplaceId;
+  document.getElementById('btn-save').disabled = true;
+  document.getElementById('btn-push').disabled = true;
+  const prog = document.getElementById('progress');
+  prog.classList.remove('hidden');
+  prog.innerHTML = '';
+  document.getElementById('status').classList.add('hidden');
+
+  const es = new EventSource('/api/sync?' + new URLSearchParams(body).toString());
+  // We can't POST with EventSource, so we use a fetch to start the sync and read the stream
+  es.close();
+
+  fetch('/api/sync', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  }).then(async response => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const ev = JSON.parse(line.slice(6));
+            updateProgress(ev);
+          } catch(e) {}
+        }
+      }
+    }
+    // Process remaining buffer
+    if (buffer.startsWith('data: ')) {
+      try { updateProgress(JSON.parse(buffer.slice(6))); } catch(e) {}
+    }
+  }).catch(e => {
+    showStatus('Connection error: ' + e.message, true);
+  }).finally(() => {
+    document.getElementById('btn-save').disabled = false;
+    document.getElementById('btn-push').disabled = false;
+    loadWorkouts();
+  });
+}
+
+function updateProgress(ev) {
+  const prog = document.getElementById('progress');
+  const id = 'step-' + ev.step;
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = id;
+    el.className = 'step';
+    prog.appendChild(el);
+  }
+  if (ev.status === 'done') {
+    el.className = 'step done';
+    el.innerHTML = '<span class="step-icon">&#10003;</span> ' + ev.message;
+    if (ev.workoutId) {
+      showStatus('Workout created! ID: ' + ev.workoutId, false);
+    }
+  } else if (ev.status === 'error') {
+    el.className = 'step error';
+    el.innerHTML = '<span class="step-icon">&#10007;</span> ' + ev.message;
+    showStatus(ev.message, true);
+  } else {
+    el.className = 'step active';
+    el.innerHTML = '<span class="step-icon"><span class="spinner"></span></span> ' + ev.message;
+  }
+}
+
+function showStatus(msg, isError) {
+  const el = document.getElementById('status');
+  el.className = 'status-msg ' + (isError ? 'error' : 'success');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+// Saved workouts
+async function loadWorkouts() {
+  try {
+    const r = await fetch('/api/workouts');
+    const workouts = await r.json();
+    const list = document.getElementById('workout-list');
+    if (!workouts.length) {
+      list.innerHTML = '<p style="color:#555;font-size:0.85rem">No saved workouts</p>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const w of workouts) {
+      const div = document.createElement('div');
+      div.className = 'workout-item' + (selectedReplaceId === w.id ? ' selected' : '');
+      div.innerHTML = '<span class="wname">' + (w.name||'Untitled') + '</span><span class="wid">' + (w.id||'').slice(0,8) + '...</span>';
+      div.addEventListener('click', () => {
+        if (selectedReplaceId === w.id) { selectedReplaceId = null; }
+        else { selectedReplaceId = w.id; }
+        document.querySelectorAll('.workout-item').forEach(i => i.classList.remove('selected'));
+        if (selectedReplaceId) div.classList.add('selected');
+      });
+      list.appendChild(div);
+    }
+  } catch(e) {
+    document.getElementById('workout-list').innerHTML = '<p style="color:#555;font-size:0.85rem">Could not load workouts</p>';
+  }
+}
+
+loadWorkouts();
+</script>
+</body>
+</html>"""
+
+
+def run_ui(args):
+    """Start the local web UI."""
+    try:
+        from flask import Flask, request, Response, jsonify
+    except ImportError:
+        print("ERROR: Flask is required for the web UI. Install it with:", file=sys.stderr)
+        print("  pip install flask>=3.0.0", file=sys.stderr)
+        sys.exit(1)
+
+    app = Flask(__name__)
+    api = FormAPI(args.token, refresh_token=args.refresh_token)
+    has_ble = bool(args.goggle_mac)
+
+    @app.route("/")
+    def index():
+        html = UI_HTML.replace("__HAS_BLE__", "true" if has_ble else "false")
+        return Response(html, content_type="text/html")
+
+    @app.route("/api/parse-fit", methods=["POST"])
+    def api_parse_fit():
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        f = request.files["file"]
+        tmp = tempfile.NamedTemporaryFile(suffix=".fit", delete=False)
+        try:
+            f.save(tmp.name)
+            tmp.close()
+            sections, wkt_name = parse_fit_file(tmp.name)
+            name = wkt_name or generate_name(sections)
+            return jsonify({
+                "name": name,
+                "sections": sections,
+                "totalDistance": calc_total_distance(sections),
+                "estimatedDuration": calc_duration_estimate(sections),
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    @app.route("/api/parse-string", methods=["POST"])
+    def api_parse_string():
+        data = request.get_json()
+        if not data or not data.get("workout"):
+            return jsonify({"error": "No workout string provided"}), 400
+        try:
+            sections = parse_workout_string(data["workout"])
+            name = generate_name(sections)
+            return jsonify({
+                "name": name,
+                "sections": sections,
+                "totalDistance": calc_total_distance(sections),
+                "estimatedDuration": calc_duration_estimate(sections),
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
+    @app.route("/api/sync", methods=["POST"])
+    def api_sync():
+        data = request.get_json()
+        if not data or not data.get("sections"):
+            return jsonify({"error": "No workout data"}), 400
+
+        sections = data["sections"]
+        name = data.get("name", "Custom Workout")
+        with_ble = data.get("ble", False) and has_ble
+        replace_id = data.get("replaceId")
+
+        def generate():
+            # Step 1: Create workout
+            yield f"data: {json.dumps({'step': 1, 'status': 'creating', 'message': 'Creating workout on FORM server...'})}\n\n"
+            payload = build_api_payload(name, sections)
+            workout_data = api.create_workout(payload)
+            if not workout_data:
+                yield f"data: {json.dumps({'step': 1, 'status': 'error', 'message': 'Failed to create workout on FORM server'})}\n\n"
+                return
+            workout_id = workout_data["id"]
+            yield f"data: {json.dumps({'step': 1, 'status': 'done', 'message': 'Workout created: ' + workout_data.get('name', name)})}\n\n"
+
+            # Step 2: Save to user list
+            yield f"data: {json.dumps({'step': 2, 'status': 'saving', 'message': 'Saving to workout list...'})}\n\n"
+            if not api.save_workout(workout_id, replace_id=replace_id):
+                yield f"data: {json.dumps({'step': 2, 'status': 'error', 'message': 'Failed to save workout. You may have reached the max (5). Select a workout to replace.'})}\n\n"
+                return
+            yield f"data: {json.dumps({'step': 2, 'status': 'done', 'message': 'Saved to workout list'})}\n\n"
+
+            if not with_ble:
+                yield f"data: {json.dumps({'step': 5, 'status': 'done', 'message': 'Done! Workout saved on server. Sync via the FORM app or re-run with --goggle-mac for BLE push.', 'workoutId': workout_id})}\n\n"
+                return
+
+            # Step 3: Fetch protobuf
+            yield f"data: {json.dumps({'step': 3, 'status': 'fetching', 'message': 'Fetching protobuf binary...'})}\n\n"
+            workout_binary = api.fetch_protobuf(workout_id)
+            if not workout_binary:
+                yield f"data: {json.dumps({'step': 3, 'status': 'error', 'message': 'Failed to fetch protobuf'})}\n\n"
+                return
+            yield f"data: {json.dumps({'step': 3, 'status': 'done', 'message': 'Protobuf fetched (' + str(len(workout_binary)) + ' bytes)'})}\n\n"
+
+            # Step 4: BLE push
+            yield f"data: {json.dumps({'step': 4, 'status': 'pushing', 'message': 'Pushing to goggles via BLE...'})}\n\n"
+            try:
+                ble = BLESync(args.goggle_mac)
+                duration_est = calc_duration_estimate(sections)
+                ok = asyncio.run(ble.push_workout(workout_id, workout_binary, duration_est))
+                if ok:
+                    yield f"data: {json.dumps({'step': 5, 'status': 'done', 'message': 'Done! Workout is on your goggles.', 'workoutId': workout_id})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'step': 4, 'status': 'error', 'message': 'BLE push had issues. Workout is saved on server (ID: ' + workout_id + ').'})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'step': 4, 'status': 'error', 'message': 'BLE error: ' + str(e)})}\n\n"
+
+        return Response(generate(), content_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.route("/api/workouts")
+    def api_workouts():
+        workouts = api.list_saved_workouts()
+        return jsonify([{"id": w.get("id", ""), "name": w.get("name", "Untitled"), "origin": w.get("origin", "")} for w in workouts])
+
+    print(f"Starting web UI at http://localhost:5050", flush=True)
+    print(f"BLE push: {'enabled (' + args.goggle_mac + ')' if has_ble else 'disabled (no --goggle-mac)'}", flush=True)
+    webbrowser.open("http://localhost:5050")
+    app.run(host="127.0.0.1", port=5050, debug=False)
+
+
 # ===== Main =====
 
 def print_workout_plan(name, sections):
@@ -1025,6 +1546,8 @@ Examples:
   %(prog)s --token TOKEN --workout "10x50 fly @max 30s rest" --no-ble --name "Sprint Fly"
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --fit-file workout.fit
   %(prog)s --token TOKEN --fit-file ~/Downloads/swim-workout.fit --no-ble
+  %(prog)s --token TOKEN --ui
+  %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --ui
         """
     )
     parser.add_argument("--login", nargs=2, metavar=("EMAIL", "PASSWORD"),
@@ -1039,6 +1562,7 @@ Examples:
     parser.add_argument("--replace-id", help="Workout ID to remove when saving (if at max)")
     parser.add_argument("--no-ble", action="store_true", help="Skip BLE push (create + save on server only)")
     parser.add_argument("--list-workouts", action="store_true", help="List saved workouts and exit")
+    parser.add_argument("--ui", action="store_true", help="Start local web UI at http://localhost:5050")
 
     args = parser.parse_args()
 
@@ -1049,6 +1573,9 @@ Examples:
     # All other commands require --token
     if not args.token:
         parser.error("--token is required (or use --login EMAIL PASSWORD to get one)")
+
+    if args.ui:
+        return run_ui(args)
 
     if args.list_workouts:
         api = FormAPI(args.token, refresh_token=getattr(args, 'refresh_token', None))
