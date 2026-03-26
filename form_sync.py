@@ -221,20 +221,23 @@ def _resolve_fit_steps(steps):
         duration_type = str(step.get("duration_type", "")).lower().replace(" ", "_")
 
         if duration_type == "repeat_until_steps_cmplt":
-            # Repeat block: wraps steps from duration_value to current index
-            repeat_count = int(step.get("target_value", 1))
-            first_step_idx = int(step.get("duration_value", 0))
-            # Find the steps in result that correspond to first_step_idx..i-1
+            # Repeat block: wraps steps from duration_step to current index
+            repeat_count = step.get("repeat_steps") or step.get("target_value") or 1
+            repeat_count = int(repeat_count)
+            first_step_idx = step.get("duration_step") or step.get("duration_value") or 0
+            first_step_idx = int(first_step_idx)
+            # Re-parse the steps in this repeat block
             block_steps = []
             for j in range(first_step_idx, i):
                 parsed = _parse_single_fit_step(steps[j])
                 if parsed:
                     block_steps.append(parsed)
             # Remove previously added steps that are part of this repeat block
-            # (they were added with count=1, now we replace with repeat_count)
-            to_remove = i - first_step_idx
-            result = result[:-to_remove] if to_remove <= len(result) else result
-            # Attach rest from rest steps to previous active steps within block
+            # Count how many result items came from steps[first_step_idx..i-1]
+            to_remove = sum(1 for j in range(first_step_idx, i) if _parse_single_fit_step(steps[j]))
+            if to_remove > 0 and to_remove <= len(result):
+                result = result[:-to_remove]
+            # Attach rest within the block, then set repeat count
             block_sets = _attach_rest_to_sets(block_steps)
             for s in block_sets:
                 s["intervalsCount"] = repeat_count
@@ -260,12 +263,12 @@ def _parse_single_fit_step(step):
     if duration_type == "repeat_until_steps_cmplt":
         return None
 
-    # Distance (in centimeters → meters)
+    # Distance — fitparse gives meters directly (not centimeters like raw FIT SDK)
     distance = 0
     if duration_type == "distance":
         raw = step.get("duration_distance") or step.get("duration_value", 0)
         if raw is not None:
-            distance = int(float(raw) / 100) if float(raw) > 100 else int(raw)
+            distance = int(float(raw))
     elif duration_type == "time":
         raw = step.get("duration_time") or step.get("duration_value", 0)
         # Time-based step — no distance; estimate or skip
@@ -282,10 +285,22 @@ def _parse_single_fit_step(step):
         distance = 0
 
     if intensity == "rest":
-        rest_seconds = 0
         if duration_type == "distance" and distance > 0:
-            rest_seconds = int(distance * 1.2)
-        elif duration_type == "time":
+            # Distance-based "rest" is actually a recovery swim (e.g. 200m easy)
+            step_name = step.get("wkt_step_name", "")
+            stroke = _detect_stroke(step_name)
+            return {
+                "intervalsCount": 1,
+                "intervalDistance": distance,
+                "strokeType": stroke,
+                "effort": "easy",
+                "restSeconds": 0,
+                "_section": _intensity_to_section(intensity),
+                "_is_rest": False,
+            }
+        # Time-based rest
+        rest_seconds = 0
+        if duration_type == "time":
             raw = step.get("duration_time") or step.get("duration_value", 0)
             rest_seconds = int(float(raw) / 1000) if float(raw) > 1000 else int(float(raw))
         return {
