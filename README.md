@@ -112,6 +112,18 @@ python3 form_sync.py \
 
 Automatically refreshes the bearer token on 401 errors.
 
+## Web UI
+
+```bash
+# Start the local web UI
+python3 form_sync.py --ui --token YOUR_TOKEN --goggle-mac AA:BB:CC:DD:EE:FF
+
+# Without BLE (server-only mode)
+python3 form_sync.py --ui --token YOUR_TOKEN
+```
+
+Opens a local web interface at http://localhost:5050. Drag and drop FIT files or type workout strings. Your credentials stay on your machine.
+
 ## FIT File Import
 
 Import swim workouts from `.fit` files exported by TrainingPeaks, Garmin Connect, Final Surge, Today's Plan, and other training platforms.
