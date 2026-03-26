@@ -577,9 +577,10 @@ def build_api_payload(name, sections):
 
     return {
         "name": name,
+        "sport": "swimming",
         "lengthDistances": POOL_LENGTHS,
         "setGroups": set_groups,
-        "durationMin": duration_est,
+        "durationMin": max(1, duration_est // 60),
         "categories": ["endurance"],
         "intensityLevel": intensity,
         "description": f"Custom workout — {distance}m total.",
@@ -894,8 +895,9 @@ class FormAPI:
     def create_workout(self, payload):
         """Step 1: Create workout on FORM server."""
         r = self._request("POST", f"{API_BASE}/workout_builder/workouts", json=payload)
-        if r.status_code != 200:
+        if r.status_code not in (200, 201):
             print(f"ERROR: Create workout failed ({r.status_code}): {r.text}", flush=True)
+            print(f"DEBUG: Payload had {sum(len(g.get('sets', [])) for g in payload.get('setGroups', []))} total sets", flush=True)
             return None
         data = r.json()
         print(f"Created workout: {data['name']} (ID: {data['id']})", flush=True)
@@ -1410,7 +1412,7 @@ def run_ui(args):
             payload = build_api_payload(name, sections)
             workout_data = api.create_workout(payload)
             if not workout_data:
-                yield f"data: {json.dumps({'step': 1, 'status': 'error', 'message': 'Failed to create workout on FORM server'})}\n\n"
+                yield f"data: {json.dumps({'step': 1, 'status': 'error', 'message': 'Failed to create workout on FORM server. Check terminal for details.'})}\n\n"
                 return
             workout_id = workout_data["id"]
             yield f"data: {json.dumps({'step': 1, 'status': 'done', 'message': 'Workout created: ' + workout_data.get('name', name)})}\n\n"
