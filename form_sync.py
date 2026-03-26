@@ -577,7 +577,6 @@ def build_api_payload(name, sections):
 
     return {
         "name": name,
-        "sport": "swimming",
         "lengthDistances": POOL_LENGTHS,
         "setGroups": set_groups,
         "durationMin": max(1, duration_est // 60),
