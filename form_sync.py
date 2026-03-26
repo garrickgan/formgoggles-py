@@ -542,11 +542,18 @@ def build_api_set(s):
         "intervalDistance": s["intervalDistance"],
         "effort": {
             "level": s["effort"],
+            "pace": None, "percentage": None, "rpeLevel": None, "zone": None,
         },
+        "drill": None,
         "restDurationBetweenIntervalsDefined": s["restSeconds"],
         "restDurationAfterDefined": 0,
         "description": "",
+        "notes": None,
+        "endDrill": None,
+        "endStrokeType": None,
+        "headCoachFocusMode": None,
         "intervals": [],
+        "restDurationBetweenIntervalsTakeoff": None,
     }
 
 
@@ -572,7 +579,7 @@ def build_api_payload(name, sections):
         "name": name,
         "lengthDistances": POOL_LENGTHS,
         "setGroups": set_groups,
-        "durationMin": max(1, duration_est // 60),
+        "durationMin": duration_est,
         "categories": ["endurance"],
         "intensityLevel": intensity,
         "description": f"Custom workout — {distance}m total.",
