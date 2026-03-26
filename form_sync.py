@@ -893,10 +893,17 @@ class FormAPI:
 
     def create_workout(self, payload):
         """Step 1: Create workout on FORM server."""
+        import json as _json
+        print(f"DEBUG: Payload keys: {list(payload.keys())}", flush=True)
+        if payload.get("setGroups"):
+            for i, g in enumerate(payload["setGroups"]):
+                print(f"DEBUG: setGroup[{i}] keys: {list(g.keys())}, type={g.get('groupType')}, sets={len(g.get('sets', []))}", flush=True)
+                if g.get("sets"):
+                    print(f"DEBUG: set[0] keys: {list(g['sets'][0].keys())}", flush=True)
+        print(f"DEBUG: Full payload: {_json.dumps(payload, default=str)[:2000]}", flush=True)
         r = self._request("POST", f"{API_BASE}/workout_builder/workouts", json=payload)
         if r.status_code not in (200, 201):
             print(f"ERROR: Create workout failed ({r.status_code}): {r.text}", flush=True)
-            print(f"DEBUG: Payload had {sum(len(g.get('sets', [])) for g in payload.get('setGroups', []))} total sets", flush=True)
             return None
         data = r.json()
         print(f"Created workout: {data['name']} (ID: {data['id']})", flush=True)
