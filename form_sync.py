@@ -535,17 +535,20 @@ POOL_LENGTHS = [
 
 def build_api_set(s):
     """Convert parsed set dict to Form API set payload."""
+    count = s["intervalsCount"]
+    # FORM requires rest to be 0 if only 1 interval
+    rest = s["restSeconds"] if count > 1 else 0
     return {
         "strokeType": s["strokeType"],
         "equipment": [],
-        "intervalsCount": s["intervalsCount"],
+        "intervalsCount": count,
         "intervalDistance": s["intervalDistance"],
         "effort": {
             "level": s["effort"],
             "pace": None, "percentage": None, "rpeLevel": None, "zone": None,
         },
         "drill": None,
-        "restDurationBetweenIntervalsDefined": s["restSeconds"],
+        "restDurationBetweenIntervalsDefined": rest,
         "restDurationAfterDefined": 0,
         "description": "",
         "notes": None,
