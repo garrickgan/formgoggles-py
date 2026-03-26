@@ -4,6 +4,26 @@ Push custom swim workouts to FORM smart goggles over Bluetooth LE — no subscri
 
 > **Legal disclaimer:** This project is educational research into protocol interoperability. I am not a lawyer. Reverse engineering for interoperability purposes is protected under DMCA §1201(f) in the US and similar statutes elsewhere. Use responsibly and in accordance with your local laws.
 
+## Quick Start
+
+```bash
+# Install
+git clone https://github.com/yourusername/formgoggles-py.git
+cd formgoggles-py
+pip install -r requirements.txt
+protoc --python_out=. proto/form.proto proto/workout.proto
+
+# One-time setup (saves credentials to ~/.formgoggles.json)
+python3 form_sync.py --setup
+
+# That's it! Now use any mode:
+python3 form_sync.py --ui                      # Web UI (drag-and-drop)
+python3 form_sync.py --fit-file workout.fit     # FIT file import
+python3 form_sync.py --workout "10x100 free"    # Workout string
+```
+
+No need to pass `--token` or `--goggle-mac` after setup.
+
 ## What this does
 
 FORM swim goggles are excellent hardware. The subscription paywall for custom workout sync is not. This tool implements the FORM BLE + API protocol so you can push structured swim workouts directly to your goggles from the command line.
@@ -42,7 +62,7 @@ protoc --python_out=. proto/form.proto proto/workout.proto
 - FORM swim goggles (tested on firmware 3.11.211)
 - Python 3.9+
 - Linux with BlueZ (BLE push requires `sudo` for BlueZ agent registration)
-- A FORM account and bearer token (captured via mitmproxy or browser dev tools)
+- A FORM account (free tier works — run `--setup` to authenticate)
 
 ## Usage
 
@@ -171,7 +191,13 @@ Effort aliases: `threshold`=moderate, `hard`=fast, `sprint`=max, `warm`=easy
 
 ## Getting Your Bearer Token
 
-The easiest way is a direct API login — no mitmproxy needed:
+The easiest way is the setup wizard, which authenticates and saves your credentials automatically:
+
+```bash
+python3 form_sync.py --setup
+```
+
+Or get a token directly without saving:
 
 ```bash
 python3 form_sync.py --login your@email.com yourpassword
@@ -181,7 +207,17 @@ This prints your `accessToken` (valid 30 days) and `refreshToken` (valid 6 month
 
 **A free FORM account is sufficient** — no active subscription required to authenticate or use BLE sync.
 
-Alternatively, capture it manually:
+### Config Management
+
+```bash
+python3 form_sync.py --config   # Show saved config (tokens masked)
+python3 form_sync.py --logout   # Delete saved config
+python3 form_sync.py --setup    # Re-run setup (e.g., to add goggle MAC)
+```
+
+Credentials are stored in `~/.formgoggles.json`. Tokens are automatically refreshed on expiry and saved back to the config file.
+
+Alternatively, capture tokens manually:
 
 1. Install [mitmproxy](https://mitmproxy.org/)
 2. Configure your phone to proxy through mitmproxy
