@@ -576,7 +576,7 @@ def build_api_payload(name, sections):
     intensity = INTENSITY_MAP.get(dominant_effort(sections), "moderate")
 
     return {
-        "name": name,
+        "name": name[:50],
         "lengthDistances": POOL_LENGTHS,
         "setGroups": set_groups,
         "durationMin": duration_est,
