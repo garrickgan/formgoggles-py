@@ -31,6 +31,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
+from pathlib import Path
 
 import requests
 
@@ -59,6 +60,36 @@ AGENT_PATH = "/formgoggles/agent"
 
 # FORM OAuth client ID (extracted from public APK — not a secret)
 OAUTH_BASIC = "YjMzMzMxMTYtYmExNi00NjNiLWFhMWYtNjIxMWE3MDg0YTZkOnlMaGhHbDVSRUpWWWFFaUlrZGl5NXE2bU9Dd3E0a0F0YjZpYmM2elNwMGVHYk5IeENQUVB6YlNJeVh5b0E2cHdHTTZFMklqQWYwcEVpZDY1b0dHRmhBZmY="
+
+# ===== Config File =====
+
+CONFIG_PATH = Path.home() / ".formgoggles.json"
+
+
+def load_config():
+    """Load config from ~/.formgoggles.json. Returns dict or None."""
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def save_config(data):
+    """Save/merge config to ~/.formgoggles.json."""
+    existing = load_config() or {}
+    existing.update(data)
+    CONFIG_PATH.write_text(json.dumps(existing, indent=2) + "\n")
+    CONFIG_PATH.chmod(0o600)
+
+
+def delete_config():
+    """Delete ~/.formgoggles.json."""
+    try:
+        CONFIG_PATH.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
 
 # ===== FIT File Parser =====
 
@@ -844,6 +875,12 @@ class FormAPI:
             self.refresh_token = data["refreshToken"]["token"]
             self.headers["Authorization"] = f"Bearer {self.token}"
             print(f"Token refreshed (expires {data['accessToken']['expires']})", flush=True)
+            # Persist new tokens to config file
+            save_config({
+                "accessToken": self.token,
+                "refreshToken": self.refresh_token,
+                "tokenExpires": data["accessToken"]["expires"],
+            })
             return True
         return False
 
@@ -1533,6 +1570,150 @@ def cmd_login(email, password):
     return 0
 
 
+def cmd_setup():
+    """Interactive setup wizard."""
+    print("\n\U0001f97d formgoggles-py setup")
+    print("=" * 24)
+    print("This will save your FORM credentials locally so you don't need to pass flags every time.\n")
+
+    email = input("FORM email: ").strip()
+    if not email:
+        print("Aborted.", file=sys.stderr)
+        return 1
+
+    try:
+        import getpass as _gp
+        password = _gp.getpass("FORM password: ")
+    except (EOFError, ImportError):
+        print("(password will be visible — not running in a terminal)")
+        password = input("FORM password: ")
+
+    if not password:
+        print("Aborted.", file=sys.stderr)
+        return 1
+
+    # Authenticate
+    r = requests.post(
+        f"{API_BASE}/oauth/token",
+        headers={"Authorization": f"Basic {OAUTH_BASIC}", "Content-Type": "application/json"},
+        json={"email": email, "password": password},
+        timeout=10,
+    )
+    if r.status_code != 200:
+        print(f"\nLogin failed ({r.status_code}): {r.text}", file=sys.stderr)
+        return 1
+
+    data = r.json()
+    access = data["accessToken"]
+    refresh = data["refreshToken"]
+    print(f"\u2713 Authenticated as {email}")
+
+    config = {
+        "accessToken": access["token"],
+        "refreshToken": refresh["token"],
+        "tokenExpires": access["expires"],
+        "email": email,
+    }
+
+    # BLE setup
+    goggle_mac = None
+    ble_answer = input("\nDo you want to set up Bluetooth LE push? (requires goggles nearby) [y/N]: ").strip().lower()
+    if ble_answer in ("y", "yes"):
+        try:
+            from bleak import BleakScanner as _Scanner
+        except ImportError:
+            print("BLE libraries not installed. Install with: sudo apt install python3-dbus && pip install bleak")
+            print("Skipping BLE setup.")
+            _Scanner = None
+
+        if _Scanner is not None:
+            print("\nTurn on your goggles and make sure they're not connected to your phone.")
+            print("Scanning for FORM goggles...", flush=True)
+
+            async def _scan():
+                devices = await _Scanner.discover(timeout=15)
+                found = []
+                for d in devices:
+                    name = d.name or ""
+                    # Match FORM devices by name or service UUID prefix
+                    uuids = [str(u) for u in (d.metadata.get("uuids", []) if hasattr(d, 'metadata') and d.metadata else [])]
+                    if "form" in name.lower() or any(u.startswith("00012000") for u in uuids):
+                        found.append(d)
+                return found
+
+            found = asyncio.run(_scan())
+            if found:
+                for i, d in enumerate(found):
+                    print(f"  Found: {d.name or 'Unknown'} ({d.address})")
+                if len(found) == 1:
+                    confirm = input(f"Use this device? [Y/n]: ").strip().lower()
+                    if confirm in ("", "y", "yes"):
+                        goggle_mac = found[0].address
+                else:
+                    choice = input(f"Enter device number (1-{len(found)}): ").strip()
+                    try:
+                        idx = int(choice) - 1
+                        if 0 <= idx < len(found):
+                            goggle_mac = found[idx].address
+                    except ValueError:
+                        pass
+                if goggle_mac:
+                    print(f"\u2713 Goggle MAC: {goggle_mac}")
+            else:
+                print("No FORM goggles found. You can add your goggle MAC later by running --setup again or editing ~/.formgoggles.json")
+
+    if goggle_mac:
+        config["goggleMac"] = goggle_mac
+
+    save_config(config)
+
+    print(f"\n\u2713 Setup complete! Config saved to {CONFIG_PATH}")
+    print(f"\nYou can now run:")
+    print(f"  python3 form_sync.py --ui                    # Web UI")
+    print(f"  python3 form_sync.py --fit-file workout.fit   # FIT file import")
+    print(f"  python3 form_sync.py --workout \"10x100 free\"  # Workout string")
+    print(f"\nNo need to pass --token or --goggle-mac anymore.")
+    return 0
+
+
+def cmd_config():
+    """Print current config (tokens masked)."""
+    config = load_config()
+    if not config:
+        print(f"No config found at {CONFIG_PATH}")
+        print("Run 'python3 form_sync.py --setup' to get started.")
+        return 1
+
+    def mask(val):
+        if not val or len(val) < 12:
+            return val
+        return val[:6] + "..." + val[-4:]
+
+    print(f"Config: {CONFIG_PATH}\n")
+    if config.get("email"):
+        print(f"  email:        {config['email']}")
+    if config.get("accessToken"):
+        print(f"  accessToken:  {mask(config['accessToken'])}")
+    if config.get("tokenExpires"):
+        print(f"  tokenExpires: {config['tokenExpires']}")
+    if config.get("refreshToken"):
+        print(f"  refreshToken: {mask(config['refreshToken'])}")
+    if config.get("goggleMac"):
+        print(f"  goggleMac:    {config['goggleMac']}")
+    else:
+        print(f"  goggleMac:    (not set)")
+    return 0
+
+
+def cmd_logout():
+    """Delete config file."""
+    if delete_config():
+        print(f"Logged out. Deleted {CONFIG_PATH}")
+    else:
+        print(f"No config file found at {CONFIG_PATH}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="formgoggles-py: Push custom workouts to FORM swim goggles",
@@ -1550,6 +1731,9 @@ Examples:
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --ui
         """
     )
+    parser.add_argument("--setup", action="store_true", help="Run interactive setup wizard")
+    parser.add_argument("--config", action="store_true", help="Print current saved config")
+    parser.add_argument("--logout", action="store_true", help="Delete saved config (~/.formgoggles.json)")
     parser.add_argument("--login", nargs=2, metavar=("EMAIL", "PASSWORD"),
                         help="Get a bearer token from your FORM credentials (no subscription required)")
     parser.add_argument("--token", help="FORM API bearer token")
@@ -1566,19 +1750,36 @@ Examples:
 
     args = parser.parse_args()
 
+    # --setup / --config / --logout: standalone commands
+    if args.setup:
+        return cmd_setup()
+    if args.config:
+        return cmd_config()
+    if args.logout:
+        return cmd_logout()
+
     # --login: get a token and exit
     if args.login:
         return cmd_login(args.login[0], args.login[1])
 
-    # All other commands require --token
+    # Load config file — CLI flags override config values
+    config = load_config()
     if not args.token:
-        parser.error("--token is required (or use --login EMAIL PASSWORD to get one)")
+        if config and config.get("accessToken"):
+            args.token = config["accessToken"]
+        else:
+            print("No config found. Run 'python3 form_sync.py --setup' to get started, or pass --token.")
+            return 1
+    if not args.refresh_token and config and config.get("refreshToken"):
+        args.refresh_token = config["refreshToken"]
+    if not args.goggle_mac and config and config.get("goggleMac"):
+        args.goggle_mac = config["goggleMac"]
 
     if args.ui:
         return run_ui(args)
 
     if args.list_workouts:
-        api = FormAPI(args.token, refresh_token=getattr(args, 'refresh_token', None))
+        api = FormAPI(args.token, refresh_token=args.refresh_token)
         workouts = api.list_saved_workouts()
         print(f"\nSaved workouts ({len(workouts)}):", flush=True)
         for w in workouts:
