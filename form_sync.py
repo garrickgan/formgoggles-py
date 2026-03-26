@@ -57,6 +57,258 @@ AGENT_PATH = "/formgoggles/agent"
 # FORM OAuth client ID (extracted from public APK — not a secret)
 OAUTH_BASIC = "YjMzMzMxMTYtYmExNi00NjNiLWFhMWYtNjIxMWE3MDg0YTZkOnlMaGhHbDVSRUpWWWFFaUlrZGl5NXE2bU9Dd3E0a0F0YjZpYmM2elNwMGVHYk5IeENQUVB6YlNJeVh5b0E2cHdHTTZFMklqQWYwcEVpZDY1b0dHRmhBZmY="
 
+# ===== FIT File Parser =====
+
+def _detect_stroke(step_name):
+    """Detect stroke type from a FIT workout step name."""
+    if not step_name:
+        return "freestyle"
+    name = step_name.lower()
+    for keyword, stroke in [
+        ("fly", "butterfly"), ("butterfly", "butterfly"),
+        ("back", "backstroke"), ("backstroke", "backstroke"),
+        ("breast", "breaststroke"), ("breaststroke", "breaststroke"),
+        ("im", "im"),
+        ("choice", "choice"),
+        ("free", "freestyle"), ("freestyle", "freestyle"),
+    ]:
+        if keyword in name:
+            return stroke
+    return "freestyle"
+
+
+def _speed_to_effort(speed_mm_s):
+    """Convert FIT speed target (mm/s) to FORM effort level."""
+    if speed_mm_s > 1800:
+        return "max"
+    elif speed_mm_s > 1500:
+        return "strong"
+    elif speed_mm_s > 1200:
+        return "fast"
+    elif speed_mm_s > 900:
+        return "moderate"
+    return "easy"
+
+
+def _fit_intensity_to_effort(intensity, target_type=None, target_high=None):
+    """Map FIT intensity + target to FORM effort."""
+    if intensity in ("warmup", "warm_up"):
+        return "easy"
+    if intensity in ("cooldown", "cool_down"):
+        return "easy"
+    if intensity == "rest":
+        return "easy"
+    # active intensity
+    if target_type == "speed" and target_high is not None and target_high > 0:
+        return _speed_to_effort(target_high)
+    return "moderate"
+
+
+def _get_field(message, field_name, default=None):
+    """Safely get a field value from a fitparse message."""
+    field = message.get(field_name)
+    if field is not None:
+        val = field.value if hasattr(field, 'value') else field
+        if val is not None:
+            return val
+    return default
+
+
+def parse_fit_file(filepath):
+    """Parse a FIT workout file and return (sections, wkt_name).
+
+    sections has the same format as parse_workout_string():
+    {"warmup": [...], "main": [...], "cooldown": [...]}
+    wkt_name is the workout name from the FIT file, or None.
+    """
+    try:
+        from fitparse import FitFile
+    except ImportError:
+        print("ERROR: fitparse not installed. Run: pip install fitparse", file=sys.stderr)
+        sys.exit(1)
+
+    fitfile = FitFile(filepath)
+    fitfile.parse()
+
+    # Check sport type from workout message
+    wkt_name = None
+    for message in fitfile.get_messages("workout"):
+        sport = _get_field(message, "sport")
+        wkt_name_val = _get_field(message, "wkt_name")
+        if wkt_name_val:
+            wkt_name = str(wkt_name_val)
+        if sport is not None:
+            sport_val = sport if isinstance(sport, int) else getattr(sport, 'raw_value', None)
+            if sport_val is not None and sport_val != 5:
+                sport_name = str(sport)
+                print(f"WARNING: FIT file sport is '{sport_name}' (not swimming). Proceeding anyway.", flush=True)
+
+    # Parse workout steps
+    steps = []
+    for message in fitfile.get_messages("workout_step"):
+        step = {}
+        for field in message.fields:
+            step[field.name] = field.value
+        steps.append(step)
+
+    if not steps:
+        print("WARNING: No workout steps found in FIT file.", flush=True)
+        return {"warmup": [], "main": [], "cooldown": []}, wkt_name
+
+    # Resolve repeat blocks and build flat list of sets
+    raw_sets = _resolve_fit_steps(steps)
+
+    # Categorize into sections
+    sections = {"warmup": [], "main": [], "cooldown": []}
+    for s in raw_sets:
+        section = s.pop("_section", "main")
+        sections[section].append(s)
+
+    # If no warmup/cooldown detected, auto-generate
+    if not sections["warmup"] and not sections["cooldown"] and sections["main"]:
+        sections["warmup"] = [{
+            "intervalsCount": 1, "intervalDistance": 200,
+            "strokeType": "freestyle", "effort": "easy", "restSeconds": 0,
+        }]
+        sections["cooldown"] = [{
+            "intervalsCount": 1, "intervalDistance": 200,
+            "strokeType": "freestyle", "effort": "easy", "restSeconds": 0,
+        }]
+
+    return sections, wkt_name
+
+
+def _resolve_fit_steps(steps):
+    """Resolve FIT workout steps (including repeats) into flat set list."""
+    result = []
+    i = 0
+    while i < len(steps):
+        step = steps[i]
+        duration_type = str(step.get("duration_type", "")).lower().replace(" ", "_")
+
+        if duration_type == "repeat_until_steps_cmplt":
+            # Repeat block: wraps steps from duration_value to current index
+            repeat_count = int(step.get("target_value", 1))
+            first_step_idx = int(step.get("duration_value", 0))
+            # Find the steps in result that correspond to first_step_idx..i-1
+            block_steps = []
+            for j in range(first_step_idx, i):
+                parsed = _parse_single_fit_step(steps[j])
+                if parsed:
+                    block_steps.append(parsed)
+            # Remove previously added steps that are part of this repeat block
+            # (they were added with count=1, now we replace with repeat_count)
+            to_remove = i - first_step_idx
+            result = result[:-to_remove] if to_remove <= len(result) else result
+            # Attach rest from rest steps to previous active steps within block
+            block_sets = _attach_rest_to_sets(block_steps)
+            for s in block_sets:
+                s["intervalsCount"] = repeat_count
+                result.append(s)
+            i += 1
+            continue
+
+        parsed = _parse_single_fit_step(step)
+        if parsed:
+            result.append(parsed)
+        i += 1
+
+    # Final pass: attach rest steps to previous active steps
+    result = _attach_rest_to_sets(result)
+    return result
+
+
+def _parse_single_fit_step(step):
+    """Parse a single FIT workout step into an intermediate set dict."""
+    duration_type = str(step.get("duration_type", "")).lower().replace(" ", "_")
+    intensity = str(step.get("intensity", "active")).lower().replace(" ", "_")
+
+    if duration_type == "repeat_until_steps_cmplt":
+        return None
+
+    # Distance (in centimeters → meters)
+    distance = 0
+    if duration_type == "distance":
+        raw = step.get("duration_distance") or step.get("duration_value", 0)
+        if raw is not None:
+            distance = int(float(raw) / 100) if float(raw) > 100 else int(raw)
+    elif duration_type == "time":
+        raw = step.get("duration_time") or step.get("duration_value", 0)
+        # Time-based step — no distance; estimate or skip
+        time_s = float(raw) / 1000 if float(raw) > 1000 else float(raw)
+        if intensity == "rest":
+            return {
+                "_is_rest": True,
+                "_rest_seconds": int(time_s),
+                "_section": _intensity_to_section(intensity),
+            }
+        # For active time-based steps, rough estimate: time / 1.2 = meters
+        distance = max(25, int(time_s / 1.2))
+    elif duration_type == "open":
+        distance = 0
+
+    if intensity == "rest":
+        rest_seconds = 0
+        if duration_type == "distance" and distance > 0:
+            rest_seconds = int(distance * 1.2)
+        elif duration_type == "time":
+            raw = step.get("duration_time") or step.get("duration_value", 0)
+            rest_seconds = int(float(raw) / 1000) if float(raw) > 1000 else int(float(raw))
+        return {
+            "_is_rest": True,
+            "_rest_seconds": rest_seconds,
+            "_section": _intensity_to_section(intensity),
+        }
+
+    # Effort mapping
+    target_type = str(step.get("target_type", "open")).lower()
+    target_high = step.get("custom_target_value_high")
+    if target_high is not None:
+        target_high = float(target_high)
+    effort = _fit_intensity_to_effort(intensity, target_type, target_high)
+
+    # Stroke from step name
+    step_name = step.get("wkt_step_name", "")
+    stroke = _detect_stroke(step_name)
+
+    section = _intensity_to_section(intensity)
+
+    return {
+        "intervalsCount": 1,
+        "intervalDistance": max(distance, 25) if distance > 0 else 100,
+        "strokeType": stroke,
+        "effort": effort,
+        "restSeconds": 0,
+        "_section": section,
+        "_is_rest": False,
+    }
+
+
+def _intensity_to_section(intensity):
+    """Map FIT intensity to workout section."""
+    intensity = str(intensity).lower().replace(" ", "_")
+    if intensity in ("warmup", "warm_up"):
+        return "warmup"
+    if intensity in ("cooldown", "cool_down"):
+        return "cooldown"
+    return "main"
+
+
+def _attach_rest_to_sets(items):
+    """Attach rest steps to the previous active step."""
+    result = []
+    for item in items:
+        if item.get("_is_rest"):
+            if result:
+                result[-1]["restSeconds"] = item["_rest_seconds"]
+        else:
+            # Clean up internal keys
+            clean = {k: v for k, v in item.items() if not k.startswith("_")}
+            clean["_section"] = item.get("_section", "main")
+            result.append(clean)
+    return result
+
+
 # ===== Workout String Parser =====
 
 EFFORT_MAP = {
@@ -679,9 +931,13 @@ def print_workout_plan(name, sections):
 
 
 async def run(args):
-    # Parse workout
-    sections = parse_workout_string(args.workout)
-    name = args.name or generate_name(sections)
+    # Parse workout from FIT file or string
+    if args.fit_file:
+        sections, wkt_name = parse_fit_file(args.fit_file)
+        name = args.name or wkt_name or generate_name(sections)
+    else:
+        sections = parse_workout_string(args.workout)
+        name = args.name or generate_name(sections)
     print_workout_plan(name, sections)
 
     api = FormAPI(args.token, refresh_token=args.refresh_token)
@@ -767,6 +1023,8 @@ Examples:
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --workout "warmup: 200 free easy | main: 8x100 free @fast 15s rest | cooldown: 200 free easy"
   %(prog)s --token TOKEN --workout "5x200 free @mod 30s rest" --no-ble
   %(prog)s --token TOKEN --workout "10x50 fly @max 30s rest" --no-ble --name "Sprint Fly"
+  %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --fit-file workout.fit
+  %(prog)s --token TOKEN --fit-file ~/Downloads/swim-workout.fit --no-ble
         """
     )
     parser.add_argument("--login", nargs=2, metavar=("EMAIL", "PASSWORD"),
@@ -774,7 +1032,9 @@ Examples:
     parser.add_argument("--token", help="FORM API bearer token")
     parser.add_argument("--refresh-token", help="FORM API refresh token (auto-refreshes on 401)")
     parser.add_argument("--goggle-mac", help="Goggles BLE MAC address (e.g. AA:BB:CC:DD:EE:FF)")
-    parser.add_argument("--workout", help="Workout description string")
+    workout_group = parser.add_mutually_exclusive_group()
+    workout_group.add_argument("--workout", help="Workout description string")
+    workout_group.add_argument("--fit-file", help="Path to a FIT workout file (.fit)")
     parser.add_argument("--name", help="Workout name (auto-generated if omitted)")
     parser.add_argument("--replace-id", help="Workout ID to remove when saving (if at max)")
     parser.add_argument("--no-ble", action="store_true", help="Skip BLE push (create + save on server only)")
@@ -801,8 +1061,8 @@ Examples:
             print(f"  {wid}  {wname}  ({origin})", flush=True)
         return 0
 
-    if not args.workout:
-        parser.error("--workout is required")
+    if not args.workout and not args.fit_file:
+        parser.error("--workout or --fit-file is required")
 
     return asyncio.run(run(args))
 
