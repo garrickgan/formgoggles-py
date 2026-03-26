@@ -112,6 +112,33 @@ python3 form_sync.py \
 
 Automatically refreshes the bearer token on 401 errors.
 
+## FIT File Import
+
+Import swim workouts from `.fit` files exported by TrainingPeaks, Garmin Connect, Final Surge, Today's Plan, and other training platforms.
+
+```bash
+# Import from a FIT file and push to goggles
+python3 form_sync.py \
+  --token YOUR_TOKEN \
+  --goggle-mac AA:BB:CC:DD:EE:FF \
+  --fit-file ~/Downloads/swim-workout.fit
+
+# Import without BLE (server only)
+python3 form_sync.py \
+  --token YOUR_TOKEN \
+  --fit-file workout.fit \
+  --no-ble
+
+# Override the workout name from the FIT file
+python3 form_sync.py \
+  --token YOUR_TOKEN \
+  --fit-file workout.fit \
+  --no-ble \
+  --name "Tuesday Threshold"
+```
+
+The parser extracts workout steps, repeat blocks, stroke types, intensity/effort targets, and rest intervals from the FIT file and converts them into the same format used by the workout string parser.
+
 ## Workout String Format
 
 ```
