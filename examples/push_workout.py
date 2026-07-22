@@ -39,7 +39,7 @@ async def main():
     print(f"Created: {workout_id}")
 
     # 3. Save to user's workout list
-    if not api.save_workout(workout_id):
+    if api.save_workout(workout_id) != "ok":
         print("Failed to save (you may need --replace-id if at max 5)")
         return
 

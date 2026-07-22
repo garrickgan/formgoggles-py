@@ -36,15 +36,21 @@ from pathlib import Path
 import requests
 
 # BLE imports (deferred — only needed for step 4)
-BLE_AVAILABLE = True
+BLE_AVAILABLE = False
+DBUS_AVAILABLE = False
+try:
+    from bleak import BleakClient, BleakScanner
+    BLE_AVAILABLE = True
+except ImportError:
+    pass
 try:
     import dbus
     import dbus.service
     import dbus.mainloop.glib
     from gi.repository import GLib
-    from bleak import BleakClient, BleakScanner
+    DBUS_AVAILABLE = True
 except ImportError:
-    BLE_AVAILABLE = False
+    pass
 
 # Import compiled protobuf modules
 # Run: protoc --python_out=. proto/form.proto proto/workout.proto
@@ -64,6 +70,7 @@ OAUTH_BASIC = "YjMzMzMxMTYtYmExNi00NjNiLWFhMWYtNjIxMWE3MDg0YTZkOnlMaGhHbDVSRUpWW
 # ===== Config File =====
 
 CONFIG_PATH = Path.home() / ".formgoggles.json"
+BLOB_CACHE_DIR = Path.home() / ".formgoggles_blobs"
 
 
 def load_config():
@@ -89,6 +96,36 @@ def delete_config():
         return True
     except FileNotFoundError:
         return False
+
+
+def save_entitlement_blobs(bundle):
+    BLOB_CACHE_DIR.mkdir(exist_ok=True)
+    saved = []
+    if bundle.get("subscription_bytes"):
+        p = BLOB_CACHE_DIR / "subscription.bin"
+        p.write_bytes(bundle["subscription_bytes"])
+        saved.append(f"subscription ({len(bundle['subscription_bytes'])}B)")
+    if bundle.get("entitlement_bytes"):
+        p = BLOB_CACHE_DIR / "entitlement.bin"
+        p.write_bytes(bundle["entitlement_bytes"])
+        saved.append(f"entitlement ({len(bundle['entitlement_bytes'])}B)")
+    if bundle.get("feature_flags"):
+        p = BLOB_CACHE_DIR / "feature_flags.json"
+        p.write_text(json.dumps(bundle["feature_flags"]))
+        saved.append(f"feature_flags ({len(bundle['feature_flags'])} flags)")
+    return saved
+
+
+def load_entitlement_blobs():
+    sub_path = BLOB_CACHE_DIR / "subscription.bin"
+    ent_path = BLOB_CACHE_DIR / "entitlement.bin"
+    flags_path = BLOB_CACHE_DIR / "feature_flags.json"
+    bundle = {
+        "subscription_bytes": sub_path.read_bytes() if sub_path.exists() else None,
+        "entitlement_bytes": ent_path.read_bytes() if ent_path.exists() else None,
+        "feature_flags": json.loads(flags_path.read_text()) if flags_path.exists() else None,
+    }
+    return bundle
 
 
 # ===== FIT File Parser =====
@@ -383,7 +420,7 @@ STROKE_MAP = {
 }
 
 INTENSITY_MAP = {
-    "easy": "easy", "moderate": "moderate", "fast": "hard", "strong": "hard", "max": "hard",
+    "easy": "low", "moderate": "moderate", "fast": "high", "strong": "high", "max": "high",
     "descend": "moderate",
 }
 
@@ -617,11 +654,11 @@ def make_command(cmd_type, **kwargs):
     return msg.SerializeToString()
 
 
-def make_form_file(file_type, data):
+def make_form_file(file_type, data, encrypted=False):
     ffm = form_pb2.FormFileMessage()
     ffm.type = file_type
     ffm.data = data
-    ffm.isEncrypted = False
+    ffm.isEncrypted = encrypted
     return ffm.SerializeToString()
 
 
@@ -648,6 +685,16 @@ class BLESync:
         self.ready_event = asyncio.Event()
         self.chunk_request_event = asyncio.Event()
         self.last_chunk_requested = -1
+
+    @staticmethod
+    def _encode_varint(value):
+        """Encode an integer as a protobuf varint."""
+        result = []
+        while value > 0x7F:
+            result.append((value & 0x7F) | 0x80)
+            value >>= 7
+        result.append(value & 0x7F)
+        return bytes(result)
 
     def notification_handler(self, char, data: bytearray):
         raw = bytes(data)
@@ -747,69 +794,200 @@ class BLESync:
             await self.wait_response(3.0)
             retries += 1
 
-    async def push_workout(self, workout_id, workout_binary, duration_est):
+    async def push_workout(self, workout_id, workout_binary, duration_est, menu="imports", sync_start="normal", entitlement_bundle=None, entitlement_mode="server"):
         """Push workout files to goggles via BLE."""
         if not BLE_AVAILABLE:
-            print("ERROR: BLE libraries not available (bleak, dbus, gi)", flush=True)
+            print("ERROR: bleak library not available. Install with: pip install bleak", flush=True)
             return False
 
         # Build FormFileMessage payloads
+        import time
+        now_seconds = int(time.time())
+
+        if menu not in ("imports", "saved", "all"):
+            raise ValueError(f"Unsupported direct BLE menu: {menu}")
+        if sync_start not in ("normal", "no-ui"):
+            raise ValueError(f"Unsupported sync start mode: {sync_start}")
+
+        # 1. WorkoutsInfo (type 7) — register in the target visible category.
         wim = form_pb2.WorkoutsInfoMessage()
-        wi = wim.importedWorkouts.add()
-        wi.id = workout_id
-        wi.expectedDuration = duration_est
+        categories = []
+        if menu in ("saved", "all"):
+            categories.append("standaloneWorkouts")
+        if menu in ("imports", "all"):
+            categories.append("importedWorkouts")
+        if menu == "all":
+            categories += ["planWorkouts", "sampleWorkouts", "personalizedWorkouts"]
+        for category in categories:
+            wi = getattr(wim, category).add()
+            wi.id = workout_id
+            wi.expectedDuration = duration_est
         wim_file = make_form_file(7, wim.SerializeToString())
 
-        iwm = form_pb2.ImportedWorkoutsInfoMessage()
-        iw = iwm.workouts.add()
-        iw.workoutId = workout_id
-        iw.status = 10  # UPCOMING
-        iw.origin = 2   # CUSTOM_WORKOUT
-        iwm_file = make_form_file(11, iwm.SerializeToString())
+        index_files = [(1, wim_file, "WorkoutsInfo")]
 
+        if menu in ("saved", "all"):
+            swm = form_pb2.SavedWorkoutsMessage()
+            sw = swm.workouts.add()
+            sw.id = workout_id
+            sw.lastModifiedAt.seconds = now_seconds
+            index_files.append((len(index_files) + 1, make_form_file(6, swm.SerializeToString()), "SavedWorkouts"))
+
+        if menu in ("imports", "all"):
+            iwm = form_pb2.ImportedWorkoutsInfoMessage()
+            # In "all" mode, add both FORM_WORKOUT and CUSTOM_WORKOUT origins
+            origins = [1, 2] if menu == "all" else [2]  # 1=FORM_WORKOUT, 2=CUSTOM_WORKOUT
+            for origin in origins:
+                iw = iwm.workouts.add()
+                iw.workoutId = workout_id
+                iw.status = 10  # UPCOMING
+                iw.origin = origin
+                iw.scheduledAt.seconds = now_seconds
+                iw.statusLastModified.seconds = now_seconds
+                iw.lastSync.seconds = now_seconds
+                iw.expiresAt.seconds = now_seconds + 14 * 24 * 60 * 60
+            iwm_file = make_form_file(11, iwm.SerializeToString())
+            index_files.append((len(index_files) + 1, iwm_file, "ImportedWorkoutsInfo"))
+
+        if menu == "all":
+            pim = form_pb2.PlanInfoMessage()
+            pim.name = "Custom Plan"
+            pim.id = workout_id
+            pim.planStartTimeUTC.seconds = now_seconds
+            pim.planWeekDuration = 7
+            pim.planCurrentWeekCursor = 1
+            pw = pim.workouts.add()
+            pw.workoutId = workout_id
+            pw.planWeekWorkoutId = 1
+            pw.weekNumber = 1
+            pw.status = 10  # UPCOMING
+            index_files.append((len(index_files) + 1, make_form_file(9, pim.SerializeToString()), "PlanInfo"))
+
+        # 5. WorkoutData (type 5)
         wd_file = make_form_file(5, workout_binary)
 
+        # 6. UpNextWorkouts (type 15)
         unm = form_pb2.UpNextWorkoutsMessage()
-        un = unm.upNextWorkouts.add()
-        un.id = workout_id
-        un.type = 1  # STANDALONE
-        un.expectedDuration = duration_est
+        up_next_types = []
+        if menu in ("saved", "all"):
+            up_next_types.append(1)  # STANDALONE
+        if menu == "all":
+            up_next_types.append(2)  # PLAN
+        if menu in ("imports", "all"):
+            up_next_types.append(3)  # IMPORT
+        if menu == "all":
+            up_next_types.append(4)  # HEAD_COACH
+        for wtype in up_next_types:
+            un = unm.upNextWorkouts.add()
+            un.id = workout_id
+            un.type = wtype
+            un.expectedDuration = duration_est
+            if wtype == 2:
+                un.planWeekWorkoutId = 1
         unm_file = make_form_file(15, unm.SerializeToString())
 
-        # BLE setup
-        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-        bus = dbus.SystemBus()
+        # Entitlement/subscription/feature-flags data (pushed before workout data,
+        # matching the order the official FORM app uses during sync).
+        entitlement_files = []
+        if entitlement_mode == "spoof":
+            # Send fabricated unencrypted subscription/entitlement data.
+            # Guess at the protobuf schema based on the server's JSON API fields.
+            # Subscription: try {isSubscribed: true, expiryDate: far future}
+            import time as _t
+            far_future = int(_t.time()) + 365 * 24 * 3600
+            # field 1 (bool) = true, field 2 (uint64) = far_future timestamp
+            sub_proto = b"\x08\x01\x10" + self._encode_varint(far_future)
+            entitlement_files.append((
+                make_form_file(8, sub_proto, encrypted=False),
+                "SubscriptionInfo(spoofed)",
+            ))
+            # Entitlement: try {isEntitled: true}
+            ent_proto = b"\x08\x01"
+            entitlement_files.append((
+                make_form_file(10, ent_proto, encrypted=False),
+                "DeviceEntitlement(spoofed)",
+            ))
+            # Feature flags: send all known flags
+            ff_msg = form_pb2.FeatureFlagsV2Message()
+            all_flags = [
+                "externalWorkoutBuilder", "plans", "head-coach", "head-coach-v2",
+                "headcoach-plan", "headcoach-insights-v2", "swim-straight",
+                "swim-straight-launch", "workout-text-parser", "up-next",
+                "recommended-focus", "form-score", "training-peaks-mvp",
+                "auto-update", "real-time-pace", "manual-heart-rate-zones",
+            ]
+            for flag_name in all_flags:
+                f = ff_msg.featureFlag.add()
+                f.name = flag_name
+            entitlement_files.append((
+                make_form_file(17, ff_msg.SerializeToString()),
+                "FeatureFlagsV2(all)",
+            ))
+        elif entitlement_mode == "none":
+            pass  # Skip all entitlement data
+        elif entitlement_bundle:
+            sub_bytes = entitlement_bundle.get("subscription_bytes")
+            if sub_bytes:
+                entitlement_files.append((
+                    make_form_file(8, sub_bytes, encrypted=True),
+                    "SubscriptionInfo",
+                ))
+            ent_bytes = entitlement_bundle.get("entitlement_bytes")
+            if ent_bytes:
+                entitlement_files.append((
+                    make_form_file(10, ent_bytes, encrypted=True),
+                    "DeviceEntitlement",
+                ))
+            flags = entitlement_bundle.get("feature_flags")
+            if flags:
+                ff_msg = form_pb2.FeatureFlagsV2Message()
+                for flag_name in flags:
+                    if len(flag_name) <= 30:
+                        f = ff_msg.featureFlag.add()
+                        f.name = flag_name
+                entitlement_files.append((
+                    make_form_file(17, ff_msg.SerializeToString()),
+                    "FeatureFlagsV2",
+                ))
 
-        class AutoAgent(dbus.service.Object):
-            @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
-            def Release(self): pass
-            @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
-            def AuthorizeService(self, d, u): pass
-            @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
-            def RequestPinCode(self, d): return "0000"
-            @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
-            def RequestPasskey(self, d): return dbus.UInt32(0)
-            @dbus.service.method("org.bluez.Agent1", in_signature="ouq", out_signature="")
-            def DisplayPasskey(self, d, p, e): pass
-            @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
-            def RequestConfirmation(self, d, p): pass
-            @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
-            def RequestAuthorization(self, d): pass
-            @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
-            def Cancel(self): pass
+        # BLE setup — DBus/BlueZ agent only needed on Linux for pairing
+        glib_loop = None
+        if DBUS_AVAILABLE:
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            bus = dbus.SystemBus()
 
-        agent = AutoAgent(bus, AGENT_PATH)
-        mgr = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"), "org.bluez.AgentManager1")
-        try:
-            mgr.UnregisterAgent(AGENT_PATH)
-        except Exception:
-            pass
-        mgr.RegisterAgent(AGENT_PATH, "DisplayYesNo")
-        mgr.RequestDefaultAgent(AGENT_PATH)
+            class AutoAgent(dbus.service.Object):
+                @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+                def Release(self): pass
+                @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+                def AuthorizeService(self, d, u): pass
+                @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
+                def RequestPinCode(self, d): return "0000"
+                @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
+                def RequestPasskey(self, d): return dbus.UInt32(0)
+                @dbus.service.method("org.bluez.Agent1", in_signature="ouq", out_signature="")
+                def DisplayPasskey(self, d, p, e): pass
+                @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+                def RequestConfirmation(self, d, p): pass
+                @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
+                def RequestAuthorization(self, d): pass
+                @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+                def Cancel(self): pass
 
-        glib_loop = GLib.MainLoop()
-        threading.Thread(target=glib_loop.run, daemon=True).start()
-        await asyncio.sleep(0.5)
+            agent = AutoAgent(bus, AGENT_PATH)
+            mgr = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"), "org.bluez.AgentManager1")
+            try:
+                mgr.UnregisterAgent(AGENT_PATH)
+            except Exception:
+                pass
+            mgr.RegisterAgent(AGENT_PATH, "DisplayYesNo")
+            mgr.RequestDefaultAgent(AGENT_PATH)
+
+            glib_loop = GLib.MainLoop()
+            threading.Thread(target=glib_loop.run, daemon=True).start()
+            await asyncio.sleep(0.5)
+        else:
+            print("Note: DBus not available (macOS) — skipping BlueZ agent (not needed if already paired)", flush=True)
 
         print(f"Scanning for {self.mac}...", flush=True)
         device = await BleakScanner.find_device_by_address(self.mac, timeout=15.0)
@@ -822,6 +1000,169 @@ class BLESync:
         try:
             await client.connect()
             print("Connected to goggles", flush=True)
+            await asyncio.sleep(1.0)
+
+            chars = {}
+            for svc in client.services:
+                for char in svc.characteristics:
+                    chars[char.uuid.split("-")[0]] = char
+
+            wc = chars.get("00012001")
+            nc = chars.get("00012000")
+            if not wc or not nc:
+                print("ERROR: Required BLE characteristics not found!", flush=True)
+                print(f"  Available characteristics: {list(chars.keys())}", flush=True)
+                return False
+
+            print("Starting notifications...", flush=True)
+            await asyncio.wait_for(client.start_notify(nc, self.notification_handler), timeout=15.0)
+
+            # This only changes the session start command; it does not send
+            # entitlement, subscription, feature-flag, or remote-config data.
+            start_cmd_name = "SYNC_START_NO_UI" if sync_start == "no-ui" else "SYNC_START"
+            start_cmd_type = 30 if sync_start == "no-ui" else 1
+            print(f"Starting sync with {start_cmd_name}...", flush=True)
+            await self.send_cmd(client, wc, start_cmd_name, start_cmd_type)
+            await self.wait_response(3.0)
+            if self.disconnect_requested:
+                print("ERROR: Goggles requested disconnect", flush=True)
+                return False
+
+            # Push entitlement data first (matches official app sync order),
+            # then workout indexes, workout payload, and up-next pointer.
+            files = []
+            for ent_data, ent_label in entitlement_files:
+                files.append((len(files) + 1, ent_data, ent_label))
+            for idx, fdata, label in index_files:
+                files.append((len(files) + 1, fdata, label))
+            files.append((len(files) + 1, wd_file, "WorkoutData"))
+            files.append((len(files) + 1, unm_file, "UpNextWorkouts"))
+            for idx, fdata, label in files:
+                await self.file_transfer(client, wc, idx, fdata, label)
+
+            # SYNC_COMPLETE
+            await self.send_cmd(client, wc, "SYNC_COMPLETE", 2)
+            await self.wait_response(3.0)
+
+            # Count successes
+            total = len(files)
+            successes = sum(1 for _, d in self.received if "OK" in d)
+            print(f"\nBLE sync complete: {successes}/{total} transfers succeeded", flush=True)
+            success = successes == total
+
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            if glib_loop:
+                glib_loop.quit()
+
+        return success
+
+    async def full_sync(self, all_workout_ids, all_workout_binaries, entitlement_bundle,
+                        new_workout_id=None, duration_est=300, sync_start="normal"):
+        """Full sync that mirrors the official FORM app behavior.
+
+        Sends ALL workouts (not just the new one), plus entitlement data,
+        matching the order and completeness of the official app's sync.
+        """
+        if not BLE_AVAILABLE:
+            print("ERROR: bleak library not available", flush=True)
+            return False
+
+        import time
+        now_seconds = int(time.time())
+
+        files = []
+
+        # 1. Subscription + Entitlement + Feature Flags (app sends these first)
+        if entitlement_bundle:
+            sub_bytes = entitlement_bundle.get("subscription_bytes")
+            if sub_bytes:
+                files.append((make_form_file(8, sub_bytes, encrypted=True), "SubscriptionInfo"))
+            ent_bytes = entitlement_bundle.get("entitlement_bytes")
+            if ent_bytes:
+                files.append((make_form_file(10, ent_bytes, encrypted=True), "DeviceEntitlement"))
+            flags = entitlement_bundle.get("feature_flags")
+            if flags:
+                ff_msg = form_pb2.FeatureFlagsV2Message()
+                for flag_name in flags:
+                    if len(flag_name) <= 30:
+                        f = ff_msg.featureFlag.add()
+                        f.name = flag_name
+                files.append((make_form_file(17, ff_msg.SerializeToString()), "FeatureFlagsV2"))
+
+        # 2. WorkoutsInfo — ALL workouts, registered as standaloneWorkouts
+        wim = form_pb2.WorkoutsInfoMessage()
+        for wid in all_workout_ids:
+            wi = wim.standaloneWorkouts.add()
+            wi.id = wid
+            wi.expectedDuration = duration_est
+        files.append((make_form_file(7, wim.SerializeToString()), "WorkoutsInfo(all)"))
+
+        # 3. SavedWorkouts — ALL workout IDs
+        swm = form_pb2.SavedWorkoutsMessage()
+        for wid in all_workout_ids:
+            sw = swm.workouts.add()
+            sw.id = wid
+            sw.lastModifiedAt.seconds = now_seconds
+        files.append((make_form_file(6, swm.SerializeToString()), "SavedWorkouts(all)"))
+
+        # 4. WorkoutData — binary for EACH workout
+        for wid in all_workout_ids:
+            binary = all_workout_binaries.get(wid)
+            if binary:
+                files.append((make_form_file(5, binary), f"WorkoutData({wid[:8]})"))
+
+        # 5. UpNextWorkouts — point to the new workout if specified
+        unm = form_pb2.UpNextWorkoutsMessage()
+        if new_workout_id:
+            un = unm.upNextWorkouts.add()
+            un.id = new_workout_id
+            un.type = 1  # STANDALONE
+            un.expectedDuration = duration_est
+        files.append((make_form_file(15, unm.SerializeToString()), "UpNextWorkouts"))
+
+        # BLE connection and transfer
+        glib_loop = None
+        if DBUS_AVAILABLE:
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            bus = dbus.SystemBus()
+            AGENT_PATH = "/com/formgoggles/agent"
+            class PairingAgent(dbus.service.Object):
+                @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+                def Release(self): pass
+                @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+                def RequestConfirmation(self, device, passkey): return
+                @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
+                def AuthorizeService(self, device): return
+            agent = PairingAgent(bus, AGENT_PATH)
+            mgr = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"), "org.bluez.AgentManager1")
+            try:
+                mgr.UnregisterAgent(AGENT_PATH)
+            except Exception:
+                pass
+            mgr.RegisterAgent(AGENT_PATH, "DisplayYesNo")
+            mgr.RequestDefaultAgent(AGENT_PATH)
+            glib_loop = GLib.MainLoop()
+            threading.Thread(target=glib_loop.run, daemon=True).start()
+            await asyncio.sleep(0.5)
+        else:
+            print("Note: DBus not available (macOS) — skipping BlueZ agent", flush=True)
+
+        print(f"Scanning for {self.mac}...", flush=True)
+        device = await BleakScanner.find_device_by_address(self.mac, timeout=15.0)
+        if not device:
+            print("ERROR: Goggles not found!", flush=True)
+            return False
+
+        client = BleakClient(device)
+        success = False
+        try:
+            await client.connect()
+            print("Connected to goggles", flush=True)
+            await asyncio.sleep(1.0)
 
             chars = {}
             for svc in client.services:
@@ -834,36 +1175,36 @@ class BLESync:
                 print("ERROR: Required BLE characteristics not found!", flush=True)
                 return False
 
-            await asyncio.wait_for(client.start_notify(nc, self.notification_handler), timeout=5.0)
+            print("Starting notifications...", flush=True)
+            await asyncio.wait_for(client.start_notify(nc, self.notification_handler), timeout=15.0)
 
-            # SYNC_START
-            await self.send_cmd(client, wc, "SYNC_START", 1)
+            start_cmd_type = 30 if sync_start == "no-ui" else 1
+            start_cmd_name = "SYNC_START_NO_UI" if sync_start == "no-ui" else "SYNC_START"
+            print(f"Starting sync with {start_cmd_name}...", flush=True)
+            await self.send_cmd(client, wc, start_cmd_name, start_cmd_type)
             await self.wait_response(3.0)
             if self.disconnect_requested:
                 print("ERROR: Goggles requested disconnect", flush=True)
                 return False
 
-            # Push 4 files
-            await self.file_transfer(client, wc, 1, wim_file, "WorkoutsInfo")
-            await self.file_transfer(client, wc, 2, iwm_file, "ImportedWorkoutsInfo")
-            await self.file_transfer(client, wc, 3, wd_file, "WorkoutData")
-            await self.file_transfer(client, wc, 4, unm_file, "UpNextWorkouts")
+            for idx, (fdata, label) in enumerate(files, 1):
+                await self.file_transfer(client, wc, idx, fdata, label)
 
-            # SYNC_COMPLETE
             await self.send_cmd(client, wc, "SYNC_COMPLETE", 2)
             await self.wait_response(3.0)
 
-            # Count successes
+            total = len(files)
             successes = sum(1 for _, d in self.received if "OK" in d)
-            print(f"\nBLE sync complete: {successes}/4 transfers succeeded", flush=True)
-            success = successes == 4
+            print(f"\nBLE sync complete: {successes}/{total} transfers succeeded", flush=True)
+            success = successes == total
 
         finally:
             try:
                 await client.disconnect()
             except Exception:
                 pass
-            glib_loop.quit()
+            if glib_loop:
+                glib_loop.quit()
 
         return success
 
@@ -920,20 +1261,24 @@ class FormAPI:
         return data
 
     def save_workout(self, workout_id, replace_id=None):
-        """Step 2: Save workout to user's list."""
+        """Step 2: Save workout to user's list. Returns 'ok', 'subscription_required', 'max_reached', or 'error'."""
         body = {"addWorkoutId": workout_id}
         if replace_id:
             body["removeWorkoutId"] = replace_id
         r = self._request("POST", f"{API_BASE}/users/me/workouts", json=body)
         if r.status_code == 200:
             print(f"Saved workout to user list", flush=True)
-            return True
+            return "ok"
+        elif r.status_code == 403 and "subscription_required" in r.text.lower():
+            print(f"ERROR: FORM Premium is required to save/import workouts to your FORM library.", flush=True)
+            print(f"Tip: Try --direct-ble to test a local BLE transfer that skips the FORM library save.", flush=True)
+            return "subscription_required"
         elif r.status_code == 400 and "max" in r.text.lower():
             print(f"ERROR: Max saved workouts reached. Use --replace-id to swap one out.", flush=True)
-            return False
+            return "max_reached"
         else:
             print(f"ERROR: Save failed ({r.status_code}): {r.text}", flush=True)
-            return False
+            return "error"
 
     def fetch_protobuf(self, workout_id):
         """Step 3: Fetch server-generated protobuf binary."""
@@ -958,6 +1303,80 @@ class FormAPI:
         data = r.json()
         workouts = data if isinstance(data, list) else data.get("workouts", [])
         return workouts
+
+    def fetch_all_protobufs(self, workout_ids):
+        """Fetch protobuf binaries for multiple workout IDs at once."""
+        if not workout_ids:
+            return {}
+        ids_str = ",".join(workout_ids)
+        r = self._request("GET", f"{API_BASE}/users/me/workouts/protobuf",
+                          params={"workoutIds": ids_str})
+        if r.status_code != 200:
+            return {}
+        result = {}
+        for item in r.json():
+            result[item["id"]] = base64.b64decode(item["binary"])
+        return result
+
+    def get_device_id(self):
+        """Get the first registered device ID."""
+        r = self._request("GET", f"{API_BASE}/users/me/devices")
+        if r.status_code != 200:
+            return None
+        devices = r.json()
+        if not devices:
+            return None
+        return devices[0]["id"]
+
+    def fetch_subscription_protobuf(self):
+        """Fetch encrypted subscription protobuf blob from server."""
+        r = self._request("GET", f"{API_BASE}/users/me/subscriptions/protobuf")
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        b64 = data.get("encryptedBinary", "")
+        if not b64:
+            return None
+        return base64.b64decode(b64)
+
+    def fetch_entitlement_protobuf(self, device_id):
+        """Fetch encrypted device entitlement protobuf blob from server."""
+        r = self._request("GET", f"{API_BASE}/devices/{device_id}/entitlements/protobuf")
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        b64 = data.get("encryptedBinary", "")
+        if not b64:
+            return None
+        return base64.b64decode(b64)
+
+    def fetch_feature_flags(self):
+        """Fetch feature flags list from server."""
+        r = self._request("GET", f"{API_BASE}/users/me/feature_flags")
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        return data.get("enabledFeatures", [])
+
+    def fetch_entitlement_bundle(self):
+        """Fetch all entitlement-related data for BLE sync.
+
+        Returns dict with subscription_bytes, entitlement_bytes, and feature_flags list,
+        or None values for anything that fails.
+        """
+        device_id = self.get_device_id()
+        if not device_id:
+            print("WARNING: No device registered on FORM account", flush=True)
+
+        sub = self.fetch_subscription_protobuf()
+        ent = self.fetch_entitlement_protobuf(device_id) if device_id else None
+        flags = self.fetch_feature_flags()
+
+        return {
+            "subscription_bytes": sub,
+            "entitlement_bytes": ent,
+            "feature_flags": flags,
+        }
 
 
 # ===== Web UI =====
@@ -1136,6 +1555,7 @@ footer a { color: #666; }
 
   <div id="actions" class="actions hidden">
     <button class="btn btn-primary" id="btn-sync" onclick="doSync(HAS_BLE)"></button>
+    <button class="btn btn-secondary hidden" id="btn-direct" onclick="doSync(true, true)">Direct BLE</button>
   </div>
 
   <div id="progress" class="progress hidden"></div>
@@ -1230,13 +1650,15 @@ function showPreview(data) {
   document.getElementById('progress').classList.add('hidden');
   document.getElementById('status').classList.add('hidden');
   document.getElementById('btn-sync').textContent = HAS_BLE ? 'Push to Goggles' : 'Create & Save';
+  document.getElementById('btn-direct').classList.toggle('hidden', !HAS_BLE);
 }
 
-function doSync(withBle) {
+function doSync(withBle, directBle = false) {
   const name = document.getElementById('preview-name').value.trim() || 'Custom Workout';
-  const body = { sections: currentSections, name: name, ble: withBle };
+  const body = { sections: currentSections, name: name, ble: withBle, directBle: directBle };
   if (selectedReplaceId) body.replaceId = selectedReplaceId;
   document.getElementById('btn-sync').disabled = true;
+  document.getElementById('btn-direct').disabled = true;
   const prog = document.getElementById('progress');
   prog.classList.remove('hidden');
   prog.innerHTML = '';
@@ -1277,6 +1699,7 @@ function doSync(withBle) {
     showStatus('Connection error: ' + e.message, true);
   }).finally(() => {
     document.getElementById('btn-sync').disabled = false;
+    document.getElementById('btn-direct').disabled = false;
     loadWorkouts();
   });
 }
@@ -1417,6 +1840,7 @@ def run_ui(args):
         sections = data["sections"]
         name = data.get("name", "Custom Workout")
         with_ble = data.get("ble", False) and has_ble
+        direct_ble = data.get("directBle", False) and has_ble
         replace_id = data.get("replaceId")
 
         def generate():
@@ -1430,10 +1854,48 @@ def run_ui(args):
             workout_id = workout_data["id"]
             yield f"data: {json.dumps({'step': 1, 'status': 'done', 'message': 'Workout created: ' + workout_data.get('name', name)})}\n\n"
 
+            if direct_ble:
+                # Direct BLE: skip server save, fetch protobuf immediately, push to goggles.
+                yield f"data: {json.dumps({'step': 2, 'status': 'done', 'message': 'Skipped server save (direct BLE mode)'})}\n\n"
+
+                yield f"data: {json.dumps({'step': 3, 'status': 'fetching', 'message': 'Fetching protobuf (pre-save)...'})}\n\n"
+                workout_binary = api.fetch_protobuf(workout_id)
+                if not workout_binary:
+                    yield f"data: {json.dumps({'step': 3, 'status': 'error', 'message': 'Failed to fetch protobuf before saving. The API may have changed.'})}\n\n"
+                    return
+                yield f"data: {json.dumps({'step': 3, 'status': 'done', 'message': 'Protobuf fetched (' + str(len(workout_binary)) + ' bytes)'})}\n\n"
+
+                yield f"data: {json.dumps({'step': 4, 'status': 'pushing', 'message': 'Pushing directly to goggles via BLE...'})}\n\n"
+                try:
+                    ble = BLESync(args.goggle_mac)
+                    duration_est = calc_duration_estimate(sections)
+                    ok = asyncio.run(ble.push_workout(
+                        workout_id,
+                        workout_binary,
+                        duration_est,
+                        menu=args.direct_ble_menu,
+                        sync_start=args.direct_ble_sync_start,
+                    ))
+                    if ok:
+                        yield f"data: {json.dumps({'step': 5, 'status': 'done', 'message': 'Done! Workout pushed directly to goggles (not saved to FORM library).', 'workoutId': workout_id})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'step': 4, 'status': 'error', 'message': 'BLE push failed. The goggles may have rejected the transfer.'})}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'step': 4, 'status': 'error', 'message': 'BLE error: ' + str(e)})}\n\n"
+                return
+
+            # Standard flow: save to server first
             # Step 2: Save to user list
             yield f"data: {json.dumps({'step': 2, 'status': 'saving', 'message': 'Saving to workout list...'})}\n\n"
-            if not api.save_workout(workout_id, replace_id=replace_id):
-                yield f"data: {json.dumps({'step': 2, 'status': 'error', 'message': 'Failed to save workout. You may have reached the max (5). Select a workout to replace.'})}\n\n"
+            save_result = api.save_workout(workout_id, replace_id=replace_id)
+            if save_result != "ok":
+                if save_result == "subscription_required":
+                    msg = "FORM Premium is required to save workouts to your library. Try Direct BLE mode to test local transfer."
+                elif save_result == "max_reached":
+                    msg = "Max saved workouts reached (5). Select a workout to replace."
+                else:
+                    msg = "Failed to save workout. Check terminal for details."
+                yield f"data: {json.dumps({'step': 2, 'status': 'error', 'message': msg})}\n\n"
                 return
             yield f"data: {json.dumps({'step': 2, 'status': 'done', 'message': 'Saved to workout list'})}\n\n"
 
@@ -1514,7 +1976,87 @@ async def run(args):
     print_workout_plan(name, sections)
 
     api = FormAPI(args.token, refresh_token=args.refresh_token)
+    direct_ble = getattr(args, "direct_ble", False)
 
+    if direct_ble:
+        total_steps = 4
+        step_label = lambda n: f"Step {n}/{total_steps}"
+
+        # Step 1: Create on server
+        print(f"{step_label(1)}: Creating workout on FORM server...", flush=True)
+        payload = build_api_payload(name, sections)
+        workout_data = api.create_workout(payload)
+        if not workout_data:
+            return 1
+        workout_id = workout_data["id"]
+
+        # Step 2: Fetch protobuf before the Premium-gated library save.
+        print(f"\n{step_label(2)}: Fetching protobuf (pre-save)...", flush=True)
+        workout_binary = api.fetch_protobuf(workout_id)
+        if not workout_binary:
+            print("ERROR: Could not fetch protobuf before saving. The API may have changed.", flush=True)
+            return 1
+
+        # Step 3: Fetch entitlement/subscription/feature-flags data from server.
+        ent_mode = getattr(args, "entitlement_mode", "server")
+        bundle = None
+        if ent_mode == "server":
+            print(f"\n{step_label(3)}: Fetching entitlement data from server...", flush=True)
+            bundle = api.fetch_entitlement_bundle()
+            sub = bundle["subscription_bytes"]
+            ent = bundle["entitlement_bytes"]
+            flags_count = len(bundle["feature_flags"]) if bundle["feature_flags"] else 0
+            print(f"  Subscription protobuf: {'yes' if sub else 'no'}{f' ({len(sub)}B)' if sub else ''}", flush=True)
+            if sub:
+                print(f"    hex: {sub.hex()}", flush=True)
+            print(f"  Entitlement protobuf: {'yes' if ent else 'no'}{f' ({len(ent)}B)' if ent else ''}", flush=True)
+            if ent:
+                print(f"    hex: {ent.hex()}", flush=True)
+            print(f"  Feature flags: {flags_count}", flush=True)
+            saved = save_entitlement_blobs(bundle)
+            if saved:
+                print(f"  Cached to {BLOB_CACHE_DIR}: {', '.join(saved)}", flush=True)
+        elif ent_mode == "cached":
+            print(f"\n{step_label(3)}: Loading cached entitlement blobs from {BLOB_CACHE_DIR}...", flush=True)
+            bundle = load_entitlement_blobs()
+            sub_ok = f"{len(bundle['subscription_bytes'])}B" if bundle["subscription_bytes"] else "MISSING"
+            ent_ok = f"{len(bundle['entitlement_bytes'])}B" if bundle["entitlement_bytes"] else "MISSING"
+            flags_count = len(bundle["feature_flags"]) if bundle["feature_flags"] else 0
+            print(f"  Subscription blob: {sub_ok}", flush=True)
+            print(f"  Entitlement blob: {ent_ok}", flush=True)
+            print(f"  Feature flags: {flags_count}", flush=True)
+            if not bundle["subscription_bytes"] and not bundle["entitlement_bytes"]:
+                print("  WARNING: No cached blobs found! Run with --entitlement-mode server while premium is active first.", flush=True)
+        elif ent_mode == "spoof":
+            print(f"\n{step_label(3)}: Using spoofed subscription data (unencrypted)...", flush=True)
+        else:
+            print(f"\n{step_label(3)}: Skipping entitlement data...", flush=True)
+
+        # Step 4: Push directly to goggles via BLE
+        print(f"\n{step_label(4)}: Pushing to goggles via BLE ({args.goggle_mac})...", flush=True)
+        ble = BLESync(args.goggle_mac)
+        duration_est = calc_duration_estimate(sections)
+        push_mode = "server" if ent_mode == "cached" else ent_mode
+        ok = await ble.push_workout(
+            workout_id,
+            workout_binary,
+            duration_est,
+            menu=args.direct_ble_menu,
+            sync_start=args.direct_ble_sync_start,
+            entitlement_bundle=bundle,
+            entitlement_mode=push_mode,
+        )
+
+        if ok:
+            print(f"\nDone! Workout '{name}' pushed directly to goggles via BLE.", flush=True)
+            print("Note: This workout is NOT saved to your FORM library.", flush=True)
+            return 0
+        else:
+            print(f"\nBLE push failed. The goggles may have rejected the transfer.", flush=True)
+            print(f"Workout ID: {workout_id}", flush=True)
+            return 1
+
+    # Standard flow (requires Premium for server save)
     # Step 1: Create on server
     print("Step 1/4: Creating workout on FORM server...", flush=True)
     payload = build_api_payload(name, sections)
@@ -1526,8 +2068,9 @@ async def run(args):
 
     # Step 2: Save to user's workout list
     print("\nStep 2/4: Saving to user's workout list...", flush=True)
-    if not api.save_workout(workout_id, replace_id=args.replace_id):
-        if not args.replace_id:
+    save_result = api.save_workout(workout_id, replace_id=args.replace_id)
+    if save_result != "ok":
+        if save_result == "max_reached" and not args.replace_id:
             print("\nSaved workouts:", flush=True)
             for w in api.list_saved_workouts():
                 wid = w.get("id", "?")
@@ -1738,6 +2281,7 @@ Examples:
   %(prog)s --login your@email.com yourpassword
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --workout "10x100 free @moderate 20s rest"
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --workout "warmup: 200 free easy | main: 8x100 free @fast 15s rest | cooldown: 200 free easy"
+  %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --workout "10x100 free @mod 20s rest" --direct-ble
   %(prog)s --token TOKEN --workout "5x200 free @mod 30s rest" --no-ble
   %(prog)s --token TOKEN --workout "10x50 fly @max 30s rest" --no-ble --name "Sprint Fly"
   %(prog)s --token TOKEN --goggle-mac AA:BB:CC:DD:EE:FF --fit-file workout.fit
@@ -1760,6 +2304,14 @@ Examples:
     parser.add_argument("--name", help="Workout name (auto-generated if omitted)")
     parser.add_argument("--replace-id", help="Workout ID to remove when saving (if at max)")
     parser.add_argument("--no-ble", action="store_true", help="Skip BLE push (create + save on server only)")
+    parser.add_argument("--direct-ble", action="store_true",
+                        help="Experimental: push workout to goggles without saving to FORM library")
+    parser.add_argument("--direct-ble-menu", choices=("imports", "saved", "all"), default="imports",
+                        help="Visible goggles menu to target in direct BLE mode (default: imports)")
+    parser.add_argument("--direct-ble-sync-start", choices=("normal", "no-ui"), default="normal",
+                        help="BLE session start command for direct BLE mode (default: normal)")
+    parser.add_argument("--entitlement-mode", choices=("server", "cached", "spoof", "none"), default="server",
+                        help="Entitlement data: server=fetch from API (saves to cache), cached=replay saved blobs, spoof=fabricated, none=skip")
     parser.add_argument("--list-workouts", action="store_true", help="List saved workouts and exit")
     parser.add_argument("--ui", action="store_true", help="Start local web UI at http://localhost:5050")
 
@@ -1806,6 +2358,12 @@ Examples:
 
     if not args.workout and not args.fit_file:
         parser.error("--workout or --fit-file is required")
+
+    if args.direct_ble:
+        if args.no_ble:
+            parser.error("--direct-ble and --no-ble are mutually exclusive")
+        if not args.goggle_mac:
+            parser.error("--direct-ble requires --goggle-mac (or set it via --setup)")
 
     return asyncio.run(run(args))
 

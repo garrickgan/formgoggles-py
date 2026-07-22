@@ -1,6 +1,6 @@
 # formgoggles-py
 
-Push custom swim workouts to FORM smart goggles over Bluetooth LE — no subscription required.
+Push custom swim workouts to FORM smart goggles over Bluetooth LE.
 
 > **Legal disclaimer:** This project is educational research into protocol interoperability. I am not a lawyer. Reverse engineering for interoperability purposes is protected under DMCA §1201(f) in the US and similar statutes elsewhere. Use responsibly and in accordance with your local laws.
 
@@ -26,7 +26,7 @@ No need to pass `--token` or `--goggle-mac` after setup.
 
 ## What this does
 
-FORM swim goggles are excellent hardware. The subscription paywall for custom workout sync is not. This tool implements the FORM BLE + API protocol so you can push structured swim workouts directly to your goggles from the command line.
+FORM swim goggles are excellent hardware. This tool implements the FORM BLE + API protocol so you can push structured swim workouts from the command line and inspect where FORM's library save/import flow requires Premium.
 
 **One command. Define a workout, push it, swim it.**
 
@@ -39,12 +39,20 @@ python3 form_sync.py \
 
 ## What happens
 
+**Standard mode** (requires FORM Premium for step 2):
+
 1. **Creates** the workout on FORM's server via their REST API
-2. **Saves** it to your workout list
+2. **Saves** it to your workout list (requires Premium)
 3. **Fetches** the server-generated protobuf binary
 4. **Pushes** it to your goggles over Bluetooth LE
 
-All four steps, one command, ~15 seconds.
+**Direct BLE mode** (`--direct-ble`, experimental):
+
+1. **Creates** the workout on FORM's server
+2. **Fetches** the protobuf immediately, before the Premium-gated server save
+3. **Pushes** it to your goggles over Bluetooth LE
+
+All steps in one command, ~15 seconds.
 
 ## Setup
 
@@ -95,6 +103,26 @@ python3 form_sync.py \
   --name "Tuesday Threshold"
 ```
 
+### Direct BLE (experimental)
+
+```bash
+python3 form_sync.py \
+  --token YOUR_TOKEN \
+  --goggle-mac AA:BB:CC:DD:EE:FF \
+  --workout "10x100 free @moderate 20s rest" \
+  --direct-ble --direct-ble-menu imports
+```
+
+Attempts to push the workout directly to your goggles over BLE without saving to your FORM library. This skips the server save step that currently requires FORM Premium. The workout is created on the server to generate the protobuf, fetched immediately, and sent to your goggles.
+
+- The workout will **not** appear in your FORM library or app
+- `--direct-ble-menu imports` targets the goggles' "My Imports" menu
+- `--direct-ble-menu saved` targets "My Saved Workouts"
+- `--direct-ble-menu all` also writes plan metadata and should only be used for experiments
+- `--direct-ble-sync-start no-ui` tests FORM's alternate `SYNC_START_NO_UI` command without sending entitlement or feature-flag data
+- If the goggles reject the transfer, the tool fails cleanly
+- No entitlement spoofing or subscription bypass is attempted
+
 ### Server-only (skip BLE push)
 
 ```bash
@@ -104,7 +132,7 @@ python3 form_sync.py \
   --no-ble
 ```
 
-Creates and saves the workout on the FORM server. Sync via the official app later.
+Creates and saves the workout on the FORM server. Sync via the official app later. Requires FORM Premium.
 
 ### List saved workouts
 
@@ -205,7 +233,7 @@ python3 form_sync.py --login your@email.com yourpassword
 
 This prints your `accessToken` (valid 30 days) and `refreshToken` (valid 6 months).
 
-**A free FORM account is sufficient** — no active subscription required to authenticate or use BLE sync.
+**A free FORM account is sufficient to authenticate.** Saving/importing workouts to your FORM library currently requires FORM Premium; `--direct-ble` tests whether local BLE transfer works without using that library save step.
 
 ### Config Management
 

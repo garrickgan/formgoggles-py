@@ -212,6 +212,100 @@ message UpNextWorkoutInfo {
   }
 }
 
+// Feature flags v2 (type 17) — extracted from APK decompilation
+// Not encrypted. Sent as FormFileMessage{type=17, data=<this>, isEncrypted=false}
+message FeatureFlagsV2Message {
+  repeated FeatureFlag featureFlag = 1;
+  message FeatureFlag {
+    string name = 1;
+  }
+}
+
+// Device settings v2 (type 2) — extracted from APK decompilation
+message DeviceSettingsV2Message {
+  string field1 = 1;
+  string field2 = 2;
+  string field3 = 3;
+  int32 field4 = 4;
+  bool field5 = 5;
+  Timestamp timestamp = 6;
+  int32 timezoneOffsetMs = 7;
+  bool isDST = 8;
+  BrightnessLevel brightness = 9;
+  Timestamp brightnessUpdatedAt = 10;
+  Orientation orientation = 11;
+  Timestamp orientationUpdatedAt = 12;
+  bool shortRestDetection = 13;
+  int32 field14 = 14;
+  int32 effortlessSyncMinBatteryPercent = 15;
+  int32 effortlessSyncMinActivities = 16;
+  int32 effortlessSyncAdvertiseDuration = 17;
+  EffortlessSyncState effortlessSyncState = 18;
+  LocationMagField locationMagField = 19;
+  bool isAlwaysOnHeartRateEnabled = 20;
+  TargetedDataLogging targetedDataLogging = 21;
+  bool isSmartSetEnabled = 22;
+  bool isSightingReminderEnabled = 23;
+
+  enum BrightnessLevel {
+    RESERVED_BRIGHTNESS_LEVEL = 0;
+    LEVEL_0 = 1;
+    LEVEL_25 = 2;
+    LEVEL_50 = 3;
+    LEVEL_75 = 4;
+    LEVEL_100 = 5;
+  }
+  enum Orientation {
+    RESERVED_ORIENTATION = 0;
+    LEFT = 1;
+    RIGHT = 2;
+  }
+  enum EffortlessSyncState {
+    RESERVED_EFFORTLESS_SYNC_STATE = 0;
+    DISABLED = 1;
+    ENABLED = 2;
+  }
+  message LocationMagField {
+    float east = 1;
+    float north = 2;
+    float vertical = 3;
+  }
+  message TargetedDataLogging {
+    uint64 startTime = 1;
+    uint32 duration = 2;
+    uint32 frequency = 3;
+    bool enabled = 4;
+  }
+}
+
+// User profile v2 (type 13) — extracted from APK decompilation
+message UserProfileV2Message {
+  Gender gender = 1;
+  uint32 height = 2;
+  uint32 weight = 3;
+  uint32 age = 4;
+  bool isImperial = 5;
+  Language language = 6;
+  string secretKey = 7;
+  repeated HeartRateZone heartRateZones = 8;
+
+  enum Gender {
+    RESERVED_GENDER = 0;
+    MALE = 1;
+    FEMALE = 2;
+    UNSPECIFIED = 3;
+    NON_BINARY = 4;
+  }
+  enum Language {
+    RESERVED_LANGUAGE = 0;
+    ENGLISH = 1;
+  }
+  message HeartRateZone {
+    uint32 zoneNumber = 1;
+    uint32 maxBpm = 2;
+  }
+}
+
 message FormDataMessage {
   DataType dataType = 1;
   uint32 fileIndex = 2;

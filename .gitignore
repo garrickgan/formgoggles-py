@@ -11,3 +11,8 @@ build/
 test-workout.fit
 __pycache__/
 *.pyc
+
+# Local research artifacts — do not distribute
+apk/
+logs/
+proto/proto/
