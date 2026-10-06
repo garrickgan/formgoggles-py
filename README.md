@@ -70,7 +70,8 @@ protoc --python_out=. proto/form.proto proto/workout.proto
 - FORM swim goggles (tested on firmware 3.11.211)
 - Python 3.9+
 - Linux with BlueZ (BLE push requires `sudo` for BlueZ agent registration)
-- A FORM account (free tier works — run `--setup` to authenticate)
+- A FORM account (free tier works to authenticate and create workouts — run `--setup`)
+- FORM Premium to get workouts onto the goggles (see [Direct BLE known limitation](#direct-ble-experimental))
 
 ## Usage
 
@@ -104,6 +105,10 @@ python3 form_sync.py \
 ```
 
 ### Direct BLE (experimental)
+
+> **Known limitation:** workouts pushed with `--direct-ble` currently **do not appear on the goggles**. The goggles acknowledge every transfer (`FILE_TRANSFER_SUCCESS`), but have never been observed to commit the workout — see [SYNC_LOG.md](./SYNC_LOG.md). A successful transfer log is not confirmation that the workout is on the device. The only path known to work is standard mode (requires FORM Premium) followed by a sync in the FORM app.
+>
+> To check what is actually on your goggles: `python3 read_goggle_indexes.py --target imports`
 
 ```bash
 python3 form_sync.py \
@@ -233,7 +238,7 @@ python3 form_sync.py --login your@email.com yourpassword
 
 This prints your `accessToken` (valid 30 days) and `refreshToken` (valid 6 months).
 
-**A free FORM account is sufficient to authenticate.** Saving/importing workouts to your FORM library currently requires FORM Premium; `--direct-ble` tests whether local BLE transfer works without using that library save step.
+**A free FORM account is sufficient to authenticate.** Saving/importing workouts to your FORM library currently requires FORM Premium; `--direct-ble` skips that library save step, but is experimental and not currently known to get workouts onto the goggles.
 
 ### Config Management
 
