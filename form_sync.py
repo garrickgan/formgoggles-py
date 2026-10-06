@@ -64,6 +64,16 @@ except ImportError:
 API_BASE = "https://app.formathletica.com/api/v1"
 AGENT_PATH = "/formgoggles/agent"
 
+# Direct BLE transfers are ACKed (FILE_TRANSFER_SUCCESS) but the goggles have
+# never been observed to commit them — see SYNC_LOG.md. Shown wherever a direct
+# push "succeeds" so users don't mistake an ACK for the workout being on-device.
+DIRECT_BLE_CAVEAT = (
+    "Direct BLE is experimental: the goggles acknowledge the transfer, but workouts "
+    "pushed this way are not currently known to appear on the goggles (see SYNC_LOG.md). "
+    "The only path known to work is saving to your FORM library (requires FORM Premium) "
+    "and syncing with the FORM app."
+)
+
 # FORM OAuth client ID (extracted from public APK — not a secret)
 OAUTH_BASIC = "YjMzMzMxMTYtYmExNi00NjNiLWFhMWYtNjIxMWE3MDg0YTZkOnlMaGhHbDVSRUpWWWFFaUlrZGl5NXE2bU9Dd3E0a0F0YjZpYmM2elNwMGVHYk5IeENQUVB6YlNJeVh5b0E2cHdHTTZFMklqQWYwcEVpZDY1b0dHRmhBZmY="
 
@@ -1271,7 +1281,7 @@ class FormAPI:
             return "ok"
         elif r.status_code == 403 and "subscription_required" in r.text.lower():
             print(f"ERROR: FORM Premium is required to save/import workouts to your FORM library.", flush=True)
-            print(f"Tip: Try --direct-ble to test a local BLE transfer that skips the FORM library save.", flush=True)
+            print(f"Note: --direct-ble skips this save, but is experimental and not known to work.", flush=True)
             return "subscription_required"
         elif r.status_code == 400 and "max" in r.text.lower():
             print(f"ERROR: Max saved workouts reached. Use --replace-id to swap one out.", flush=True)
@@ -1476,6 +1486,7 @@ textarea:focus { outline: none; border-color: #00B4D8; }
 .step.active { color: #00B4D8; }
 .step.done { color: #4ade80; }
 .step.error { color: #f87171; }
+.step.warn { color: #fbbf24; }
 .step-icon { width: 20px; text-align: center; font-size: 0.8rem; }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #333; border-top-color: #00B4D8; border-radius: 50%; animation: spin 0.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1486,6 +1497,7 @@ textarea:focus { outline: none; border-color: #00B4D8; }
 }
 .status-msg.success { background: rgba(74,222,128,0.1); color: #4ade80; border: 1px solid rgba(74,222,128,0.2); }
 .status-msg.error { background: rgba(248,113,113,0.1); color: #f87171; border: 1px solid rgba(248,113,113,0.2); }
+.status-msg.warn { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.2); }
 
 /* Saved workouts */
 .saved-workouts { margin-top: 32px; }
@@ -1555,7 +1567,7 @@ footer a { color: #666; }
 
   <div id="actions" class="actions hidden">
     <button class="btn btn-primary" id="btn-sync" onclick="doSync(HAS_BLE)"></button>
-    <button class="btn btn-secondary hidden" id="btn-direct" onclick="doSync(true, true)">Direct BLE</button>
+    <button class="btn btn-secondary hidden" id="btn-direct" onclick="doSync(true, true)" title="Experimental: transfers are acknowledged but workouts are not currently known to appear on the goggles">Direct BLE (experimental)</button>
   </div>
 
   <div id="progress" class="progress hidden"></div>
@@ -1720,6 +1732,10 @@ function updateProgress(ev) {
     if (ev.workoutId) {
       showStatus('Workout created! ID: ' + ev.workoutId, false);
     }
+  } else if (ev.status === 'warn') {
+    el.className = 'step warn';
+    el.innerHTML = '<span class="step-icon">!</span> ' + ev.message;
+    showStatus(ev.detail || ev.message, false, true);
   } else if (ev.status === 'error') {
     el.className = 'step error';
     el.innerHTML = '<span class="step-icon">&#10007;</span> ' + ev.message;
@@ -1730,9 +1746,9 @@ function updateProgress(ev) {
   }
 }
 
-function showStatus(msg, isError) {
+function showStatus(msg, isError, isWarn = false) {
   const el = document.getElementById('status');
-  el.className = 'status-msg ' + (isError ? 'error' : 'success');
+  el.className = 'status-msg ' + (isError ? 'error' : isWarn ? 'warn' : 'success');
   el.textContent = msg;
   el.classList.remove('hidden');
 }
@@ -1877,7 +1893,7 @@ def run_ui(args):
                         sync_start=args.direct_ble_sync_start,
                     ))
                     if ok:
-                        yield f"data: {json.dumps({'step': 5, 'status': 'done', 'message': 'Done! Workout pushed directly to goggles (not saved to FORM library).', 'workoutId': workout_id})}\n\n"
+                        yield f"data: {json.dumps({'step': 5, 'status': 'warn', 'message': 'Transfers acknowledged by goggles, but not confirmed on device (not saved to FORM library)', 'detail': DIRECT_BLE_CAVEAT, 'workoutId': workout_id})}\n\n"
                     else:
                         yield f"data: {json.dumps({'step': 4, 'status': 'error', 'message': 'BLE push failed. The goggles may have rejected the transfer.'})}\n\n"
                 except Exception as e:
@@ -1890,7 +1906,7 @@ def run_ui(args):
             save_result = api.save_workout(workout_id, replace_id=replace_id)
             if save_result != "ok":
                 if save_result == "subscription_required":
-                    msg = "FORM Premium is required to save workouts to your library. Try Direct BLE mode to test local transfer."
+                    msg = "FORM Premium is required to save workouts to your library, which is currently the only way known to get a workout onto the goggles."
                 elif save_result == "max_reached":
                     msg = "Max saved workouts reached (5). Select a workout to replace."
                 else:
@@ -2048,8 +2064,10 @@ async def run(args):
         )
 
         if ok:
-            print(f"\nDone! Workout '{name}' pushed directly to goggles via BLE.", flush=True)
+            print(f"\nGoggles acknowledged all transfers for '{name}'.", flush=True)
             print("Note: This workout is NOT saved to your FORM library.", flush=True)
+            print(f"Warning: {DIRECT_BLE_CAVEAT}", flush=True)
+            print("Check what's actually on the goggles with: python3 read_goggle_indexes.py --target imports", flush=True)
             return 0
         else:
             print(f"\nBLE push failed. The goggles may have rejected the transfer.", flush=True)

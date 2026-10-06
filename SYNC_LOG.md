@@ -4,6 +4,18 @@ Bounded verification runs per `.claude/skills/form-sync-verification`. Every att
 
 ---
 
+## 2026-10-06 — Field report (issue #5): same "ACK ≠ commit" on a second user's goggles
+
+**Source:** [garrickgan/formgoggles-py#5](https://github.com/garrickgan/formgoggles-py/issues/5), reported by another user on macOS (no BlueZ agent; device already paired). No hardware run on our side.
+
+**Observed (reporter's logs):**
+- Web UI "Direct BLE" (`menu=imports`, no entitlement files): WorkoutsInfo, ImportedWorkoutsInfo, WorkoutData, UpNextWorkouts — **4/4 `FILE_TRANSFER_SUCCESS`**, workout not on goggles.
+- CLI `--direct-ble --direct-ble-menu imports` (default `--entitlement-mode server`, reporter's own account blobs: subscription 144B, entitlement 16B, 65 flags) — **7/7 `FILE_TRANSFER_SUCCESS`**, workout not on goggles.
+- Reporter's Premium status unknown; no index read (`read_goggle_indexes.py`) before/after.
+
+**Conclusion:** independent reproduction of the 2026-07-21 result on a different device/account/OS — the gap is not specific to our goggles or setup. The tool was reporting these runs as "Done! Workout pushed directly to goggles", which is what led to the bug report. Output now states the ACK-only result and points to the Premium library-save path; no protocol change.
+
+
 ## 2026-07-21 (evening) — "Undecodable imports payload" root-caused: transfer truncation, not schema
 
 **Question:** Baseline/verify reads failed to decode the imports index (237B of advertised 2789B). Was the protobuf schema stale?
